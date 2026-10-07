@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Luxe Boutique: Timeless Luxury, Worn Daily</title>
+  <meta name="description" content="Luxe Boutique: Pakistan's maison of luxury. Curated watches, handbags, jewelry and accessories. Cash on delivery, 7-day returns." />
+  <meta name="theme-color" content="#0d0c0a" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Luxe Boutique: Timeless Luxury" />
+  <meta property="og:description" content="Curated luxury watches, bags, jewelry and accessories. Cash on delivery across Pakistan." />
+  <meta property="og:image" content="https://images.pexels.com/photos/3829441/pexels-photo-3829441.jpeg" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+  <link rel="stylesheet" href="style.css" />
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"Store","name":"Luxe Boutique","description":"Premium watches, bags, jewelry and accessories in Pakistan.","currenciesAccepted":"PKR","paymentAccepted":"Cash on Delivery"}
+  </script>
+</head>
+<body>
+
+  <!-- Preloader -->
+  <div id="preloader" aria-hidden="true">
+    <div class="pre-inner">
+      <div class="pre-logo">LUXE BOUTIQUE</div>
+      <div class="pre-line"><span id="pre-bar"></span></div>
+      <div class="pre-pct" id="pre-pct">00</div>
+    </div>
+  </div>
+
+  <!-- Fixed top: announcement + header -->
+  <div class="topwrap">
+  <!-- Announcement -->
+  <div class="announce-bar" aria-hidden="true">
+    <div class="announce-track">
+      <span>Complimentary delivery across Pakistan</span><i>◆</i>
+      <span>Cash on delivery</span><i>◆</i>
+      <span>The Winter Edit: flat 25% off</span><i>◆</i>
+      <span>Complimentary delivery across Pakistan</span><i>◆</i>
+      <span>Cash on delivery</span><i>◆</i>
+      <span>The Winter Edit: flat 25% off</span><i>◆</i>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header id="site-header">
+    <button class="mobile-menu-toggle" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+    <nav class="main-nav" aria-label="Main navigation">
+      <ul>
+        <li><a href="#" data-page="home">Home</a></li>
+        <li><a href="#" data-page="products">Collection</a></li>
+        <li><a href="#" data-page="about">Our Story</a></li>
+        <li><a href="#" data-page="track">Track Order</a></li>
+        <li><a href="#" data-page="contact">Contact</a></li>
+      </ul>
+    </nav>
+    <a href="#" class="brand" data-page="home">LUXE&nbsp;BOUTIQUE</a>
+    <div class="header-icons">
+      <button class="icon-btn wishlist-toggle" aria-label="Open wishlist"><i class="far fa-heart"></i><span class="wishlist-count">0</span></button>
+      <button class="icon-btn cart-toggle" aria-label="Open bag"><i class="fas fa-shopping-bag"></i><span class="cart-count">0</span></button>
+    </div>
+  </header>
+  </div><!-- /.topwrap -->
+
+  <main id="main-content"></main>
+
+  <!-- Bag drawer -->
+  <aside id="cart" class="drawer" aria-hidden="true" aria-label="Shopping bag">
+    <div class="drawer-head">
+      <h2>Shopping Bag <span class="drawer-count" id="drawer-cart-count"></span></h2>
+      <button class="drawer-close cart-close" aria-label="Close bag"><i class="fas fa-times"></i></button>
+    </div>
+    <div id="cart-items" class="drawer-body"></div>
+    <div class="drawer-foot">
+      <div class="drawer-total"><span>Subtotal</span><span>Rs.<span id="cart-total">0.00</span></span></div>
+      <p class="drawer-note">Complimentary delivery · Cash on delivery</p>
+      <button id="checkout-btn" class="btn-solid">Proceed to Checkout</button>
+    </div>
+  </aside>
+
+  <!-- Wishlist drawer -->
+  <aside id="wishlist" class="drawer" aria-hidden="true" aria-label="Wishlist">
+    <div class="drawer-head">
+      <h2>Wishlist</h2>
+      <button class="drawer-close wishlist-close" aria-label="Close wishlist"><i class="fas fa-times"></i></button>
+    </div>
+    <div id="wishlist-items" class="drawer-body"></div>
+  </aside>
+
+  <div class="drawer-scrim" id="drawer-scrim"></div>
+
+  <!-- Quick view -->
+  <div class="qv-wrap" id="quickview" role="dialog" aria-modal="true" aria-label="Quick view">
+    <div class="qv-box">
+      <button class="qv-close" aria-label="Close quick view"><i class="fas fa-times"></i></button>
+      <div class="qv-grid">
+        <div class="qv-media"><img id="qv-img" src="" alt="" /></div>
+        <div class="qv-info">
+          <p class="qv-eyebrow">Luxe Boutique</p>
+          <h3 id="qv-name"></h3>
+          <div class="qv-rating" id="qv-rating"></div>
+          <p class="qv-price" id="qv-price"></p>
+          <p class="qv-desc" id="qv-desc"></p>
+          <div class="qv-actions">
+            <button class="btn-solid" id="qv-add">Add to Bag</button>
+            <a href="#" class="qv-full" id="qv-full">View full details</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite"><i class="fas fa-check"></i><span id="toast-msg"></span></div>
+
+  <!-- Mobile image zoom lightbox -->
+  <div class="zoom-lightbox" id="zoom-lightbox" role="dialog" aria-modal="true" aria-label="Product image zoom">
+    <button class="zl-close" id="zl-close" aria-label="Close zoom"><i class="fas fa-times"></i></button>
+    <div class="zl-scroll" id="zl-scroll"><img id="zl-img" src="" alt="Zoomed product image" /></div>
+    <p class="zl-hint">Pinch or double-tap to zoom</p>
+  </div>
+
+  <!-- Order confirmation email modal (admin) -->
+  <div class="a-modal" id="email-modal" role="dialog" aria-modal="true" aria-label="Send confirmation email">
+    <div class="a-modal-box" style="max-width:520px;">
+      <h3>Send confirmation email?</h3>
+      <p class="muted" style="margin-bottom:20px;font-size:14px;">To: <strong id="em-to" style="color:#0d0c0a;"></strong></p>
+      <div style="margin-bottom:16px;">
+        <label for="em-tpl" style="display:block;font-size:11px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:8px;color:#57534a;">Template</label>
+        <select id="em-tpl" style="width:100%;border:1px solid var(--line);background:#fff;padding:12px 14px;font-size:14px;border-radius:2px;">
+          <option value="auto">Auto-rotate (recommended)</option>
+          <option value="template_5wf5xlz">Template 1 — Dark Luxury</option>
+          <option value="template_ye988sb">Template 2 — Noir Header</option>
+        </select>
+      </div>
+      <div style="margin-bottom:22px;">
+        <label for="em-note" style="display:block;font-size:11px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:8px;color:#57534a;">Personal note (optional)</label>
+        <textarea id="em-note" rows="3" placeholder="Add a personal message for this customer…" style="width:100%;border:1px solid var(--line);background:#fff;padding:12px 14px;font-family:var(--sans);font-size:14px;border-radius:2px;resize:vertical;"></textarea>
+      </div>
+      <div class="pf-actions">
+        <button class="btn-solid" id="em-send" style="flex:1;">Send & Confirm</button>
+        <button class="btn-line" id="em-skip">Confirm without email</button>
+      </div>
+      <p style="margin-top:14px;"><button class="link-btn" id="em-cancel">Cancel</button></p>
+    </div>
+  </div>
+
+  <footer>
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <div class="foot-logo">LUXE BOUTIQUE</div>
+        <p>A maison of curated luxury: watches, handbags, jewelry and accessories, delivered across Pakistan.</p>
+      </div>
+      <div class="foot-col">
+        <h4>Explore</h4>
+        <a href="#" data-page="home">Home</a>
+        <a href="#" data-page="products">Collection</a>
+        <a href="#" data-page="about">Our Story</a>
+        <a href="#" data-page="track">Track Order</a>
+      </div>
+      <div class="foot-col">
+        <h4>Client Care</h4>
+        <a href="#" data-page="contact">Contact Us</a>
+        <span class="foot-static"><i class="fas fa-phone"></i> <span id="foot-phone">+92 318-1654176</span></span>
+        <span class="foot-static"><i class="fas fa-envelope"></i> <span id="foot-email">ghulamghous208@gmail.com</span></span>
+      </div>
+      <div class="foot-col">
+        <h4>Visit Us</h4>
+        <span class="foot-static" id="foot-address">Rajana Road Kamalia, District Toba Tek Singh, Pakistan</span>
+        <span class="foot-static">Mon–Fri · 9:00–17:00 PKT</span>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>© <span id="copyright-year">2026</span> Luxe Boutique. All rights reserved.</span>
+      <span class="foot-pay">Cash on Delivery · 7-Day Returns</span>
+    </div>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
