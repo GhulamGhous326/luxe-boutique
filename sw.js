@@ -1,5 +1,5 @@
 /* Luxe Boutique service worker — network-first for app shell (deploys go live instantly), cache-first for images */
-const CACHE = 'luxe-boutique-v6-38';
+const CACHE = 'luxe-boutique-v6-54';
 const CORE = ['./', './index.html', './style.css', './script.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (e) => {

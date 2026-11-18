@@ -101,6 +101,8 @@ const LocalAdapter = {
     if (password === 'luxe-admin') return 'local-demo-token';
     throw new Error('Invalid password');
   },
+  async getAdminVisits() { return []; },
+  async logAdminVisit() {},
   async getOrders() {
     const orders = JSON.parse(localStorage.getItem('luxe_orders') || '[]');
     return [...orders].reverse();
@@ -373,6 +375,12 @@ const SupabaseAdapter = {
     const j = await res.json();
     return j.access_token;
   },
+  async getAdminVisits(token) {
+    return sb('admin_visits?select=email,created_at&order=created_at.desc&limit=30', {}, token);
+  },
+  async logAdminVisit(email, token) {
+    await sb('admin_visits', { method: 'POST', body: JSON.stringify({ email }) }, token);
+  },
   async getOrders(token) {
     const rows = await sb('orders?select=*&order=created_at.desc', {}, token);
     return (rows || []).map(mapOrderRow);
@@ -460,6 +468,1503 @@ const SupabaseAdapter = {
 
 /* Adapter-based data layer: LocalAdapter today, SupabaseAdapter when configured. */
 const DB = USE_SUPABASE ? SupabaseAdapter : LocalAdapter;
+/* ============================================================
+   v6.39 — Dashboard upgrades
+   1. Abandoned cart recovery   4. Bulk order actions
+   2. Reviews system            5. Returns workflow
+   3. Reports tab               6. Low-stock email alert
+                                7. Free-shipping progress bar
+   ============================================================ */
+
+/* ---------- v6.39 DB: reviews, abandoned carts, returns ---------- */
+Object.assign(LocalAdapter, {
+  async getReviews(status) {
+    let all = [];
+    try { all = JSON.parse(localStorage.getItem('luxe_reviews') || '[]'); } catch (e) {}
+    const list = [...all].reverse();
+    return status ? list.filter(r => r.status === status) : list;
+  },
+  async createReview(r) {
+    let all = [];
+    try { all = JSON.parse(localStorage.getItem('luxe_reviews') || '[]'); } catch (e) {}
+    const rec = { id: 'r' + Date.now(), product_id: Number(r.product_id), name: String(r.name || '').slice(0, 60), rating: Math.min(5, Math.max(1, Number(r.rating) || 5)), text: String(r.text || '').slice(0, 1000), status: r.status || 'pending', created_at: new Date().toISOString() };
+    all.push(rec);
+    try { localStorage.setItem('luxe_reviews', JSON.stringify(all)); } catch (e) {}
+    return rec;
+  },
+  async updateReviewStatus(id, status) {
+    let all = [];
+    try { all = JSON.parse(localStorage.getItem('luxe_reviews') || '[]'); } catch (e) {}
+    const r = all.find(x => String(x.id) === String(id));
+    if (r) { r.status = status; try { localStorage.setItem('luxe_reviews', JSON.stringify(all)); } catch (e) {} }
+  },
+  async deleteReview(id) {
+    try {
+      const all = JSON.parse(localStorage.getItem('luxe_reviews') || '[]').filter(x => String(x.id) !== String(id));
+      localStorage.setItem('luxe_reviews', JSON.stringify(all));
+    } catch (e) {}
+  },
+  async getCarts() {
+    try { return [...JSON.parse(localStorage.getItem('luxe_carts') || '[]')].reverse(); } catch (e) { return []; }
+  },
+  async saveCart(c) {
+    let all = [];
+    try { all = JSON.parse(localStorage.getItem('luxe_carts') || '[]'); } catch (e) {}
+    const rec = { id: 'c' + Date.now(), name: c.name || '', phone: c.phone || '', email: c.email || '', items: c.items || [], subtotal: c.subtotal || 0, total: c.total || 0, created_at: new Date().toISOString() };
+    all.push(rec);
+    try { localStorage.setItem('luxe_carts', JSON.stringify(all)); } catch (e) {}
+    return rec;
+  },
+  async deleteCart(id) {
+    try {
+      const all = JSON.parse(localStorage.getItem('luxe_carts') || '[]').filter(x => String(x.id) !== String(id));
+      localStorage.setItem('luxe_carts', JSON.stringify(all));
+    } catch (e) {}
+  },
+  async getReturns() {
+    try { return [...JSON.parse(localStorage.getItem('luxe_returns') || '[]')].reverse(); } catch (e) { return []; }
+  },
+  async createReturn(r) {
+    let all = [];
+    try { all = JSON.parse(localStorage.getItem('luxe_returns') || '[]'); } catch (e) {}
+    const rec = { id: 'rt' + Date.now(), order_number: r.order_number, name: r.name || '', phone: r.phone || '', reason: String(r.reason || '').slice(0, 500), status: 'requested', created_at: new Date().toISOString() };
+    all.push(rec);
+    try { localStorage.setItem('luxe_returns', JSON.stringify(all)); } catch (e) {}
+    return rec;
+  },
+  async updateReturnStatus(id, status) {
+    let all = [];
+    try { all = JSON.parse(localStorage.getItem('luxe_returns') || '[]'); } catch (e) {}
+    const r = all.find(x => String(x.id) === String(id));
+    if (r) { r.status = status; try { localStorage.setItem('luxe_returns', JSON.stringify(all)); } catch (e) {} }
+    return r || null;
+  }
+});
+
+Object.assign(SupabaseAdapter, {
+  async getReviews(status, token) {
+    let q = 'reviews?select=*&order=created_at.desc';
+    if (status) q += '&status=eq.' + encodeURIComponent(status);
+    return await sb(q, {}, token) || [];
+  },
+  async createReview(r) {
+    const rows = await sb('reviews', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ product_id: Number(r.product_id), name: String(r.name || '').slice(0, 60), rating: Math.min(5, Math.max(1, Number(r.rating) || 5)), text: String(r.text || '').slice(0, 1000), status: r.status || 'pending' }) });
+    return rows && rows[0];
+  },
+  async updateReviewStatus(id, status, token) {
+    await sb('reviews?id=eq.' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ status }) }, token);
+  },
+  async deleteReview(id, token) {
+    await sb('reviews?id=eq.' + encodeURIComponent(id), { method: 'DELETE' }, token);
+  },
+  async getCarts(token) {
+    return await sb('abandoned_carts?select=*&order=created_at.desc', {}, token) || [];
+  },
+  async saveCart(c) {
+    await sb('abandoned_carts', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ name: c.name || null, phone: c.phone || null, email: c.email || null, items: c.items || [], subtotal: c.subtotal || 0, total: c.total || 0 }) });
+    return { id: null };
+  },
+  async deleteCart(id, token) {
+    if (!id) return;
+    await sb('abandoned_carts?id=eq.' + encodeURIComponent(id), { method: 'DELETE' }, token);
+  },
+  async getReturns(token) {
+    return await sb('returns?select=*&order=created_at.desc', {}, token) || [];
+  },
+  async createReturn(r) {
+    const rows = await sb('returns', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ order_number: r.order_number, name: r.name || null, phone: r.phone || null, reason: String(r.reason || '').slice(0, 500), status: 'requested' }) });
+    return rows && rows[0];
+  },
+  async updateReturnStatus(id, status, token) {
+    const rows = await sb('returns?id=eq.' + encodeURIComponent(id), { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status }) }, token);
+    return rows && rows[0];
+  }
+});
+
+/* ---------- v6.39 caches ---------- */
+let adminReviewsCache = [], adminCartsCache = [], adminReturnsCache = [];
+async function reloadAdminExtra() {
+  try {
+    const [rv, carts, rets] = await Promise.all([
+      DB.getReviews(null, adminToken).catch(() => []),
+      DB.getCarts(adminToken).catch(() => []),
+      DB.getReturns(adminToken).catch(() => [])
+    ]);
+    adminReviewsCache = rv || [];
+    adminCartsCache = carts || [];
+    adminReturnsCache = rets || [];
+  } catch (e) { /* tables may not exist yet: admin keeps working */ }
+}
+
+/* ============================================================
+   1. ABANDONED CART RECOVERY
+   Snapshot is taken when a shopper starts checkout but leaves
+   without placing the order. Admin nudges them on WhatsApp.
+   ============================================================ */
+let abandonedTimer = null, abandonedSavedId = null, abandonedArmed = false;
+function snapshotAbandonedCart() {
+  if (!cartContents.length) return;
+  const gv = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  const data = {
+    name: gv('co-name'), phone: gv('co-phone'), email: gv('co-email'),
+    items: cartContents.map(l => ({ id: l.id, name: l.name, price: l.price, qty: l.qty })),
+    subtotal: Number(cartSubtotal().toFixed(2)), total: Number(cartTotal().toFixed(2))
+  };
+  DB.saveCart(data).then(rec => {
+    if (abandonedSavedId) DB.deleteCart(abandonedSavedId, adminToken).catch(() => {});
+    abandonedSavedId = rec && rec.id;
+  }).catch(() => {});
+}
+function armAbandonedCapture() {
+  abandonedArmed = false;
+  const form = document.getElementById('checkout-form');
+  if (!form || !cartContents.length) return;
+  abandonedArmed = true;
+  const deb = () => { clearTimeout(abandonedTimer); abandonedTimer = setTimeout(snapshotAbandonedCart, 6000); };
+  form.addEventListener('input', deb);
+}
+function disarmAbandonedCapture() {
+  abandonedArmed = false;
+  clearTimeout(abandonedTimer);
+  if (abandonedSavedId) { DB.deleteCart(abandonedSavedId, adminToken).catch(() => {}); abandonedSavedId = null; }
+}
+window.addEventListener('pagehide', () => {
+  if (document.getElementById('checkout-form') && cartContents.length) {
+    clearTimeout(abandonedTimer);
+    snapshotAbandonedCart();
+  }
+});
+function cartNudgeLink(c) {
+  const digits = String(c.phone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  const intl = digits.startsWith('0') ? '92' + digits.slice(1) : digits;
+  const items = (c.items || []).map(it => `${it.name} x${it.qty || 1}`).join(', ');
+  const msg = `Assalam-o-Alaikum${c.name ? ' ' + c.name : ''}! You left ${items || 'items'} in your bag at Luxe Boutique (${money(c.total || 0)}). Complete your order here: https://luxeboutiquee.netlify.app/#/checkout`;
+  return 'https://wa.me/' + intl + '?text=' + encodeURIComponent(msg);
+}
+function cartsTabHTML() {
+  const list = adminCartsCache || [];
+  if (!list.length) return '<p class="d-empty">No abandoned carts yet.<br/>Carts are captured when a shopper starts checkout but leaves without ordering.</p>';
+  const digits = s => String(s || '').replace(/\D/g, '').replace(/^0/, '92');
+  return list.map(c => {
+    const items = (c.items || []).map(it => `<li><span>${escapeHtml(it.name)} <em>x ${it.qty || 1}</em></span><span>${money((it.price || 0) * (it.qty || 1))}</span></li>`).join('');
+    const wa = cartNudgeLink(c);
+    const recovered = c.phone && (adminOrdersCache || []).some(o => digits(o.phone) === digits(c.phone));
+    return `
+    <div class="a-order">
+      <div class="a-order-head">
+        <div>
+          <strong>${escapeHtml(c.name || 'Unknown shopper')}</strong>
+          ${recovered ? '<span class="a-badge-repeat" title="This phone later placed an order"><i class="fas fa-check"></i> Recovered</span>' : ''}
+          <span class="a-order-meta"><span class="rel-time">${timeAgo(c.created_at)}</span>${c.phone ? ' · ' + escapeHtml(c.phone) : ' · no phone'}</span>
+        </div>
+        <div class="a-order-right">
+          <strong>${money(c.total || 0)}</strong>
+          ${wa ? `<a class="d-mini wa" href="${wa}" target="_blank" rel="noopener" title="Nudge on WhatsApp"><i class="fab fa-whatsapp"></i> Nudge</a>` : ''}
+          <button class="d-mini danger" data-cart-del="${escapeHtml(String(c.id))}">Delete</button>
+        </div>
+      </div>
+      <ul class="o-lines">${items || '<li><span>Empty cart</span></li>'}</ul>
+    </div>`;
+  }).join('');
+}
+
+/* ============================================================
+   2. REVIEWS — shoppers write, admin approves
+   ============================================================ */
+async function loadPdpReviews(pid) {
+  const box = document.getElementById('pdp-reviews');
+  if (!box) return;
+  let approved = [];
+  try { approved = (await DB.getReviews('approved')).filter(r => Number(r.product_id) === Number(pid)); } catch (e) {}
+  if (approved.length) {
+    const avg = approved.reduce((s, r) => s + Number(r.rating || 5), 0) / approved.length;
+    const ratingEl = document.querySelector('.pdp-rating');
+    if (ratingEl) ratingEl.innerHTML = `${starsHTML(avg)} <span>${avg.toFixed(1)} · ${approved.length} verified review${approved.length === 1 ? '' : 's'}</span>`;
+  }
+  box.innerHTML = `
+    <div class="section-head"><p class="eyebrow">What customers say</p><h2>Re<em>views</em></h2></div>
+    ${approved.length ? `<div class="rv-list">${approved.map(r => `
+      <div class="rv-item">
+        <div class="rv-head">${starsHTML(Number(r.rating) || 5)}<strong>${escapeHtml(r.name || 'Customer')}</strong><span>${escapeHtml((r.created_at || '').slice(0, 10))}</span></div>
+        <p>${escapeHtml(r.text || '')}</p>
+      </div>`).join('')}</div>`
+      : '<p class="d-empty">No reviews yet. Be the first to share your experience.</p>'}
+    <form id="review-form" class="rv-form" data-pid="${Number(pid)}" novalidate>
+      <h3>Write a review</h3>
+      <div class="rv-stars" id="rv-stars" role="radiogroup" aria-label="Your rating">
+        ${[1, 2, 3, 4, 5].map(i => `<button type="button" data-star="${i}" class="${i <= 5 ? 'on' : ''}" aria-label="${i} star${i > 1 ? 's' : ''}"><i class="fas fa-star"></i></button>`).join('')}
+      </div>
+      <input type="hidden" id="rv-rating" value="5" />
+      <div class="field"><label for="rv-name">Your name</label><input id="rv-name" type="text" placeholder="Your name" required maxlength="60" /></div>
+      <div class="field"><label for="rv-text">Your review</label><textarea id="rv-text" rows="3" placeholder="How was the quality, fit and delivery?" required maxlength="1000"></textarea></div>
+      <button type="submit" class="btn-solid">Submit Review</button>
+      <p class="a-order-meta">Reviews go live after approval.</p>
+    </form>`;
+}
+function reviewsTabHTML() {
+  const f = adminReviewFilter;
+  const matchF = r => f === 'all' || Number(r.rating) === Number(f);
+  const pend = adminReviewsCache.filter(r => r.status === 'pending' && matchF(r));
+  const appr = adminReviewsCache.filter(r => r.status !== 'pending' && matchF(r));
+  const pendAll = adminReviewsCache.filter(r => r.status === 'pending').length;
+  const prodName = id => { const p = PRODUCTS.find(x => Number(x.id) === Number(id)); return p ? p.name : 'Product #' + id; };
+  const row = r => `
+    <div class="a-order">
+      <div class="a-order-head">
+        <div><strong>${escapeHtml(r.name || 'Customer')}</strong>
+          <span class="a-order-meta">on ${escapeHtml(prodName(r.product_id))} · ${escapeHtml((r.created_at || '').slice(0, 10))}</span>
+          <div style="margin-top:8px;">${starsHTML(Number(r.rating) || 5)}</div>
+        </div>
+        <div class="a-order-right">
+          <span class="a-status ${r.status === 'approved' ? 'delivered' : 'placed'}">${capitalize(r.status || 'pending')}</span>
+          ${r.status === 'pending' ? `<button class="d-mini" data-review-approve="${escapeHtml(String(r.id))}">Approve</button>` : ''}
+          <button class="d-mini danger" data-review-del="${escapeHtml(String(r.id))}">Delete</button>
+        </div>
+      </div>
+      <p class="rv-text">${escapeHtml(r.text || '')}</p>
+    </div>`;
+  return `
+    <div class="a-toolbar">
+      <div class="rv-filter" role="tablist" aria-label="Filter by rating">
+        ${['all', '5', '4', '3', '2', '1'].map(v => `<button class="${f === v ? 'active' : ''}" data-rv-filter="${v}">${v === 'all' ? 'All ratings' : v + '★'}</button>`).join('')}
+      </div>
+      ${pendAll ? `<span class="a-badge-repeat"><i class="fas fa-hourglass-half"></i> ${pendAll} pending</span>` : ''}
+    </div>
+    <h4 class="a-sec-h">Pending approval (${pend.length})</h4>
+    ${pend.length ? pend.map(row).join('') : '<p class="d-empty">Nothing waiting for approval.</p>'}
+    ${appr.length ? `<h4 class="a-sec-h">Approved (${appr.length})</h4>${appr.map(row).join('')}` : ''}`;
+}
+
+/* ============================================================
+   5. RETURNS — shopper requests, admin approves + restocks
+   ============================================================ */
+function returnsTabHTML() {
+  const list = adminReturnsCache || [];
+  const open = list.filter(r => r.status === 'requested');
+  const done = list.filter(r => r.status !== 'requested');
+  const byReason = {};
+  list.forEach(r => { const k = (r.reason || 'Not specified').trim() || 'Not specified'; byReason[k] = (byReason[k] || 0) + 1; });
+  const reasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const maxR = reasons.length ? reasons[0][1] : 1;
+  const row = r => `
+    <div class="a-order">
+      <div class="a-order-head">
+        <div><button class="link-btn od-open" data-view-order="${escapeHtml(r.order_number)}" style="font-size:16px;font-weight:700;">${escapeHtml(r.order_number)}</button>
+          <span class="a-order-meta">${escapeHtml(r.name || '')}${r.phone ? ' · ' + escapeHtml(r.phone) : ''} · <span class="rel-time">${timeAgo(r.created_at)}</span></span>
+          ${r.reason ? `<div><span class="ret-reason">${escapeHtml(r.reason)}</span></div>` : ''}
+        </div>
+        <div class="a-order-right">
+          <span class="a-status ${r.status === 'approved' || r.status === 'done' ? 'delivered' : r.status === 'rejected' ? 'placed' : 'shipped'}">${capitalize(r.status || 'requested')}</span>
+          ${r.status === 'requested' ? `
+            <button class="d-mini" data-return-approve="${escapeHtml(String(r.id))}" title="Approve: restocks the items">Approve + restock</button>
+            <button class="d-mini danger" data-return-reject="${escapeHtml(String(r.id))}">Reject</button>` : ''}
+          ${r.status === 'approved' ? `<button class="d-mini" data-return-done="${escapeHtml(String(r.id))}">Mark done</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+  return `
+    ${reasons.length ? `<div class="ov-panel" style="margin-bottom:22px;"><h4>Return reasons</h4>
+      ${reasons.map(([r, n]) => `
+        <div class="rep-bar-row"><span>${escapeHtml(r)}</span>
+          <div class="rep-bar"><span style="width:${Math.max(3, Math.round(n / maxR * 100))}%"></span></div>
+          <b>${n}</b>
+        </div>`).join('')}</div>` : ''}
+    <h4 class="a-sec-h">Open requests (${open.length})</h4>
+    ${open.length ? open.map(row).join('') : '<p class="d-empty">No open return requests.</p>'}
+    ${done.length ? `<h4 class="a-sec-h">Handled (${done.length})</h4>${done.map(row).join('')}` : ''}`;
+}
+async function approveReturn(id) {
+  const rec = (adminReturnsCache || []).find(x => String(x.id) === String(id));
+  if (!rec) return;
+  const order = (adminOrdersCache || []).find(o => o.number === rec.order_number);
+  if (order && order.items) {
+    for (const it of order.items) {
+      const p = PRODUCTS.find(x => Number(x.id) === Number(it.id));
+      if (p) {
+        const nv = (p.stock || 0) + (it.qty || 1);
+        try { await DB.updateProduct(p.id, { stock: nv }, adminToken); p.stock = nv; } catch (e) {}
+      }
+    }
+    try { await DB.updateOrderStatus(order.number, 'returned', adminToken); order.status = 'returned'; } catch (e) {}
+  }
+  await DB.updateReturnStatus(id, 'approved', adminToken).catch(() => {});
+  await reloadAdminExtra();
+  renderAdminTab();
+  showToast('Return approved: items restocked');
+}
+
+/* ============================================================
+   3. REPORTS — revenue, sales by city, top products, CSV export
+   ============================================================ */
+function reportsTabHTML() {
+  let orders = adminOrdersCache || [];
+  const ranges = [['7', '7 days'], ['30', '30 days'], ['all', 'All time']];
+  if (adminReportRange !== 'all') {
+    const cut = Date.now() - Number(adminReportRange) * 864e5;
+    orders = orders.filter(o => { const d = parseOrderDate(o.date); return d && d.getTime() >= cut; });
+  }
+  const revenue = orders.reduce((s, o) => s + Number(o.total || 0), 0);
+  const aov = orders.length ? revenue / orders.length : 0;
+  const units = orders.reduce((s, o) => s + (o.items || []).reduce((a, it) => a + (it.qty || 1), 0), 0);
+  const byCity = {};
+  orders.forEach(o => { const c = o.city || 'Unknown'; byCity[c] = (byCity[c] || 0) + Number(o.total || 0); });
+  const cities = Object.entries(byCity).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const maxC = cities.length ? cities[0][1] : 1;
+  const byProd = {};
+  orders.forEach(o => (o.items || []).forEach(it => {
+    const k = it.name || 'Unknown';
+    byProd[k] = byProd[k] || { qty: 0, rev: 0 };
+    byProd[k].qty += it.qty || 1;
+    byProd[k].rev += (it.qty || 1) * Number(it.price || 0);
+  }));
+  const prods = Object.entries(byProd).sort((a, b) => b[1].rev - a[1].rev).slice(0, 8);
+  const maxP = prods.length ? prods[0][1].rev : 1;
+  const heatDays = [];
+  for (let i = 55; i >= 0; i--) {
+    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
+    heatDays.push(d);
+  }
+  const heatCount = {};
+  orders.forEach(o => {
+    const d = parseOrderDate(o.date);
+    if (d) { const k = d.toISOString().slice(0, 10); heatCount[k] = (heatCount[k] || 0) + 1; }
+  });
+  const heatMax = Math.max(1, ...Object.values(heatCount));
+  const heatColor = n => {
+    if (!n) return 'rgba(198,161,91,.07)';
+    const a = .18 + .82 * (n / heatMax);
+    return `rgba(154,123,63,${a.toFixed(2)})`;
+  };
+  return `
+  <p class="rep-summary">${adminReportRange === 'all' ? 'All time' : `Last ${adminReportRange} days`} — across <b>${orders.length}</b> orders you have earned <b>${money(revenue)}</b> — that's <b>${units}</b> pieces at an average of <b>${money(aov)}</b> per order.</p>
+  <div class="a-toolbar">
+    <div class="rv-filter" role="tablist" aria-label="Report range">
+      ${ranges.map(([v, l]) => `<button class="${adminReportRange === v ? 'active' : ''}" data-rep-range="${v}">${l}</button>`).join('')}
+    </div>
+    <button class="d-mini" data-export-report>Export CSV</button>
+  </div>
+  <div class="rep-kpis">
+    <div class="ov-panel rep-kpi"><b>${money(revenue)}</b><span>Total revenue</span></div>
+    <div class="ov-panel rep-kpi"><b>${orders.length}</b><span>Orders</span></div>
+    <div class="ov-panel rep-kpi"><b>${money(aov)}</b><span>Avg. order value</span></div>
+    <div class="ov-panel rep-kpi"><b>${units}</b><span>Units sold</span></div>
+  </div>
+  <div class="rep-cols">
+    <div class="ov-panel">
+      <h4>Sales by city</h4>
+      ${cities.length ? cities.map(([c, v]) => `
+        <div class="rep-bar-row"><span>${escapeHtml(c)}</span>
+          <div class="rep-bar"><span style="width:${Math.max(3, Math.round(v / maxC * 100))}%"></span></div>
+          <b>${money(v)}</b>
+        </div>`).join('') : '<p class="d-empty">No city data yet.</p>'}
+    </div>
+    <div class="ov-panel">
+      <h4>Top products</h4>
+      ${prods.length ? prods.map(([n, d]) => `
+        <div class="rep-bar-row"><span>${escapeHtml(n)} <em>×${d.qty}</em></span>
+          <div class="rep-bar"><span style="width:${Math.max(3, Math.round(d.rev / maxP * 100))}%"></span></div>
+          <b>${money(d.rev)}</b>
+        </div>`).join('') : '<p class="d-empty">No product data yet.</p>'}
+    </div>
+  </div>
+  <div class="ov-panel" style="margin-top:22px;">
+    <h4>Orders heatmap <span class="a-order-meta">— last 8 weeks</span></h4>
+    <div class="heatmap">${heatDays.map(d => {
+      const k = d.toISOString().slice(0, 10);
+      const n = heatCount[k] || 0;
+      return `<span class="heat-cell" style="background:${heatColor(n)}" title="${d.toLocaleDateString('en-PK', { day: 'numeric', month: 'short' })}: ${n} order${n === 1 ? '' : 's'}"></span>`;
+    }).join('')}</div>
+    <p class="ov-chart-note">Darker = more orders</p>
+  </div>`;
+}
+function exportReportCSV() {
+  const orders = adminOrdersCache || [];
+  downloadCSV('luxe-sales-report.csv', [
+    ['Order', 'Date', 'Customer', 'Phone', 'City', 'Items', 'Subtotal', 'Discount', 'Delivery', 'Total', 'Status'],
+    ...orders.map(o => [o.number, o.date, o.name, o.phone, o.city || '', (o.items || []).reduce((s, it) => s + (it.qty || 1), 0), o.subtotal, o.discount, o.delivery, o.total, o.status])
+  ]);
+}
+
+/* ============================================================
+   6. LOW-STOCK EMAIL ALERT (uses existing EmailJS setup)
+   ============================================================ */
+function sendLowStockAlert(p) {
+  const to = (SETTINGS.store_email || '').trim();
+  if (!emailjsReady || !to || !validEmail(to)) return;
+  try {
+    if (localStorage.getItem('luxe_lowstock_' + p.id)) return;
+    localStorage.setItem('luxe_lowstock_' + p.id, '1');
+  } catch (e) {}
+  const params = {
+    to_email: to, email: to,
+    customer_name: 'Luxe Boutique Admin',
+    subject: 'Low stock: ' + p.name,
+    message_html: `<p><strong>${escapeHtml(p.name)}</strong> is running low: <strong>${p.stock} left</strong>.</p><p>Restock it from the dashboard Products tab.</p>`,
+    order_number: '-', order_total: money(0), order_items: '', personal_note: ''
+  };
+  const tpl = (SETTINGS.lowstock_email_template || '').trim() || nextEmailTemplate();
+  emailjs.send(EMAILJS_SERVICE_ID, tpl, params).catch(() => {});
+}
+function checkLowStock(p, prevStock) {
+  const th = Number(SETTINGS.low_stock_threshold != null && SETTINGS.low_stock_threshold !== '' ? SETTINGS.low_stock_threshold : 5);
+  if ((p.stock || 0) <= th && (prevStock || 0) > th) sendLowStockAlert(p);
+  else if ((p.stock || 0) > th) { try { localStorage.removeItem('luxe_lowstock_' + p.id); } catch (e) {} }
+}
+
+/* ============================================================
+   7. FREE-SHIPPING PROGRESS BAR
+   ============================================================ */
+function freeShipThreshold() { return Number(SETTINGS.free_shipping_threshold || 0) || 0; }
+function freeShipActive() { const th = freeShipThreshold(); return th > 0 && cartSubtotal() >= th; }
+function deliveryRowHTML() {
+  if (freeShipActive()) {
+    const reg = deliveryFeeFor(checkoutCity);
+    return reg > 0 ? `<s style="color:var(--stone);margin-right:8px;">${money(reg)}</s><strong style="color:#2e7d32;">FREE</strong>` : '<strong style="color:#2e7d32;">FREE</strong>';
+  }
+  return money(cartDelivery());
+}
+function freeShipBarHTML() {
+  const th = freeShipThreshold();
+  if (!(th > 0) || !cartContents.length) return '';
+  if (cartSubtotal() >= th) return `<div class="fs-bar done"><i class="fas fa-truck"></i><span>You have unlocked <strong>FREE delivery</strong></span></div>`;
+  const left = th - cartSubtotal();
+  const pct = Math.min(100, Math.round(cartSubtotal() / th * 100));
+  return `<div class="fs-bar"><i class="fas fa-truck"></i><span>Add <strong>${money(left)}</strong> more for <strong>FREE delivery</strong></span><span class="fs-track"><span style="width:${pct}%"></span></span></div>`;
+}
+
+/* ---------- v6.39 delegated events (separate from main handler) ---------- */
+document.body.addEventListener('click', e => {
+  const rvA = e.target.closest('[data-review-approve]');
+  if (rvA) {
+    const id = rvA.getAttribute('data-review-approve');
+    DB.updateReviewStatus(id, 'approved', adminToken)
+      .then(() => reloadAdminExtra()).then(() => { renderAdminTab(); showToast('Review approved'); })
+      .catch(() => showToast('Update failed'));
+    return;
+  }
+  const rvD = e.target.closest('[data-review-del]');
+  if (rvD) {
+    const id = rvD.getAttribute('data-review-del');
+    confirmModal('Delete review', 'This review will be permanently removed.', 'Delete', true).then(ok => {
+      if (!ok) return;
+      const backup = (adminReviewsCache || []).find(x => String(x.id) === String(id));
+      DB.deleteReview(id, adminToken)
+        .then(() => reloadAdminExtra()).then(() => {
+          renderAdminTab();
+          if (backup) showUndoToast('Review deleted', () => DB.createReview({ product_id: backup.product_id, name: backup.name, rating: backup.rating, text: backup.text, status: backup.status }).then(() => reloadAdminExtra()).then(() => renderAdminTab()).catch(() => showToast('Undo failed')));
+          else showToast('Review deleted');
+        })
+        .catch(() => showToast('Delete failed'));
+    });
+    return;
+  }
+  const ctD = e.target.closest('[data-cart-del]');
+  if (ctD) {
+    const id = ctD.getAttribute('data-cart-del');
+    DB.deleteCart(id, adminToken)
+      .then(() => reloadAdminExtra()).then(() => { renderAdminTab(); showToast('Cart removed'); })
+      .catch(() => showToast('Delete failed'));
+    return;
+  }
+  const rtA = e.target.closest('[data-return-approve]');
+  if (rtA) {
+    confirmModal('Approve return', 'The items will be restocked and the order marked as returned.', 'Approve', false)
+      .then(ok => { if (ok) approveReturn(rtA.getAttribute('data-return-approve')); });
+    return;
+  }
+  const rtR = e.target.closest('[data-return-reject]');
+  if (rtR) {    DB.updateReturnStatus(rtR.getAttribute('data-return-reject'), 'rejected', adminToken)
+      .then(() => reloadAdminExtra()).then(() => { renderAdminTab(); showToast('Return rejected'); })
+      .catch(() => showToast('Update failed'));
+    return;
+  }
+  const rtD = e.target.closest('[data-return-done]');
+  if (rtD) {
+    DB.updateReturnStatus(rtD.getAttribute('data-return-done'), 'done', adminToken)
+      .then(() => reloadAdminExtra()).then(() => { renderAdminTab(); showToast('Return marked done'); })
+      .catch(() => showToast('Update failed'));
+    return;
+  }
+  const star = e.target.closest('[data-star]');
+  if (star) {
+    const v = Number(star.getAttribute('data-star'));
+    document.getElementById('rv-rating').value = v;
+    document.querySelectorAll('#rv-stars [data-star]').forEach(b => b.classList.toggle('on', Number(b.getAttribute('data-star')) <= v));
+    return;
+  }
+  if (e.target.closest('[data-export-report]')) { exportReportCSV(); return; }
+  if (e.target.id === 'bulk-apply') {
+    const nums = [...document.querySelectorAll('.bulk-check:checked')].map(c => c.getAttribute('data-num'));
+    const st = document.getElementById('bulk-status').value;
+    if (!nums.length) { showToast('Select at least one order'); return; }
+    confirmModal('Bulk update', `Set ${nums.length} order${nums.length === 1 ? '' : 's'} to "${st}"?`, 'Apply', false).then(ok => {
+      if (!ok) return;
+      showToast('Updating…');
+      Promise.all(nums.map(n => DB.updateOrderStatus(n, st, adminToken).then(() => {
+        const o = adminOrdersCache.find(x => x.number === n);
+        if (o) o.status = st;
+      }))).then(() => { renderAdminTab(); showToast(`${nums.length} orders updated`); })
+        .catch(() => { renderAdminTab(); showToast('Some updates failed'); });
+    });
+    return;
+  }
+  if (e.target.id === 'bulk-all') {
+    const on = e.target.checked;
+    document.querySelectorAll('.bulk-check').forEach(c => { c.checked = on; });
+    return;
+  }
+  const reqR = e.target.closest('[data-req-return]');
+  if (reqR) {
+    const num = reqR.getAttribute('data-req-return');
+    const rname = reqR.getAttribute('data-rname') || '';
+    const rphone = reqR.getAttribute('data-rphone') || '';
+    const box = document.getElementById('return-box');
+    if (box) box.innerHTML = `
+      <form id="return-form" data-num="${escapeHtml(num)}" data-rname="${escapeHtml(rname)}" data-rphone="${escapeHtml(rphone)}" style="margin-top:14px;text-align:left;">
+        <div class="field"><label>Reason for return</label>
+          <select id="ret-reason" required>
+            <option value="Wrong size">Wrong size</option>
+            <option value="Defective item">Defective item</option>
+            <option value="Not as described">Not as described</option>
+            <option value="Changed my mind">Changed my mind</option>
+          </select>
+        </div>
+        <button type="submit" class="btn-solid" style="padding:12px 30px;">Submit Return Request</button>
+      </form>`;
+    return;
+  }
+});
+document.body.addEventListener('submit', e => {
+  if (e.target.id === 'review-form') {
+    e.preventDefault();
+    const name = document.getElementById('rv-name').value.trim();
+    const text = document.getElementById('rv-text').value.trim();
+    const rating = Number(document.getElementById('rv-rating').value) || 5;
+    const pid = e.target.getAttribute('data-pid');
+    if (!name || !text) { showToast('Please add your name and review'); return; }
+    DB.createReview({ product_id: pid, name, rating, text })
+      .then(() => {
+        e.target.innerHTML = '<p class="d-empty" style="padding:24px 10px;">Thank you! Your review was submitted and will appear after approval.</p>';
+        showToast('Review submitted');
+      })
+      .catch(() => showToast('Could not submit: check connection'));
+    return;
+  }
+  if (e.target.id === 'return-form') {
+    e.preventDefault();
+    const num = e.target.getAttribute('data-num');
+    const reason = document.getElementById('ret-reason').value;
+    DB.createReturn({ order_number: num, name: e.target.getAttribute('data-rname') || '', phone: e.target.getAttribute('data-rphone') || '', reason })
+      .then(() => {
+        document.getElementById('return-box').innerHTML = '<p class="d-empty" style="padding:18px 10px;">Return requested. We will contact you shortly.</p>';
+        showToast('Return requested');
+      })
+      .catch(() => showToast('Could not submit: check connection'));
+    return;
+  }
+});
+
+
+/* ============================================================
+   v6.40 — UI/UX polish
+   Sidebar groups, custom confirm modal, command palette (Ctrl+K),
+   "/" search shortcut, loading skeletons, tab transitions
+   ============================================================ */
+
+/* ---------- Premium confirm modal (replaces native confirm()) ---------- */
+function confirmModal(title, msg, okLabel, danger) {
+  return new Promise(resolve => {
+    const scrim = document.createElement('div');
+    scrim.className = 'cf-scrim';
+    scrim.innerHTML = `
+      <div class="cf-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+        <div class="cf-ico"><i class="fas ${danger ? 'fa-trash-can' : 'fa-circle-question'}"></i></div>
+        <h3>${escapeHtml(title)}</h3>
+        <p>${escapeHtml(msg)}</p>
+        <div class="cf-actions">
+          <button class="cf-btn" data-cf="no">Cancel</button>
+          <button class="cf-btn ${danger ? 'danger' : 'primary'}" data-cf="yes">${escapeHtml(okLabel || 'Confirm')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(scrim);
+    requestAnimationFrame(() => scrim.classList.add('open'));
+    const done = v => {
+      scrim.classList.remove('open');
+      setTimeout(() => scrim.remove(), 280);
+      document.removeEventListener('keydown', onKey);
+      resolve(v);
+    };
+    const onKey = e => { if (e.key === 'Escape') done(false); };
+    document.addEventListener('keydown', onKey);
+    scrim.addEventListener('click', e => {
+      const b = e.target.closest('[data-cf]');
+      if (b) done(b.getAttribute('data-cf') === 'yes');
+      else if (e.target === scrim) done(false);
+    });
+    scrim.querySelector('[data-cf="no"]').focus();
+  });
+}
+
+/* ---------- Command palette (Ctrl+K / Cmd+K) ---------- */
+document.body.addEventListener('click', e => {
+  if (e.target.closest('#cp-open')) { openCommandPalette(); return; }
+});
+const CP_ITEMS = [
+  ['overview', 'Overview', 'fa-chart-pie', 'Sales'],
+  ['orders', 'Orders', 'fa-bag-shopping', 'Sales'],
+  ['returns', 'Returns', 'fa-rotate-left', 'Sales'],
+  ['carts', 'Abandoned Carts', 'fa-cart-shopping', 'Sales'],
+  ['reports', 'Reports', 'fa-chart-line', 'Sales'],
+  ['products', 'Products', 'fa-gem', 'Catalog'],
+  ['reviews', 'Reviews', 'fa-star', 'Catalog'],
+  ['customers', 'Customers', 'fa-users', 'People'],
+  ['messages', 'Messages', 'fa-envelope', 'People'],
+  ['newsletter', 'Newsletter', 'fa-paper-plane', 'People'],
+  ['promos', 'Promos', 'fa-tag', 'Marketing'],
+  ['content', 'Content', 'fa-pen-nib', 'Marketing'],
+  ['settings', 'Settings', 'fa-gear', 'System']
+];
+let cpOpen = false, cpSel = 0;
+function openCommandPalette() {
+  if (cpOpen || !document.body.classList.contains('is-admin') || !adminToken) return;
+  cpOpen = true; cpSel = 0;
+  const scrim = document.createElement('div');
+  scrim.className = 'cp-scrim'; scrim.id = 'cp-scrim';
+  scrim.innerHTML = `
+    <div class="cp-card" role="dialog" aria-modal="true" aria-label="Quick navigation">
+      <div class="cp-input"><i class="fas fa-search"></i><input id="cp-q" type="text" placeholder="Jump to… (type to filter)" autocomplete="off" /></div>
+      <div class="cp-list" id="cp-list"></div>
+      <div class="cp-foot"><span><span class="kbd">↑↓</span> navigate</span><span><span class="kbd">↵</span> open</span><span><span class="kbd">esc</span> close</span></div>
+    </div>`;
+  document.body.appendChild(scrim);
+  requestAnimationFrame(() => scrim.classList.add('open'));
+  const render = () => {
+    const q = (scrim._q || '').trim().toLowerCase();
+    const items = CP_ITEMS.filter(([k, l, , g]) => !q || l.toLowerCase().includes(q) || g.toLowerCase().includes(q) || k.includes(q));
+    cpSel = Math.min(cpSel, Math.max(0, items.length - 1));
+    document.getElementById('cp-list').innerHTML = items.length ? items.map(([k, l, ic, g], i) => `
+      <button class="cp-item${i === cpSel ? ' sel' : ''}" data-cp="${k}"><i class="fas ${ic}"></i>${l}<small>${g}</small></button>`).join('')
+      : '<p class="sr-empty">No matches.</p>';
+    scrim._items = items;
+  };
+  scrim._q = '';
+  scrim._render = render;
+  document.getElementById('cp-q').addEventListener('input', ev => { scrim._q = ev.target.value; cpSel = 0; render(); });
+  scrim.addEventListener('click', e => {
+    const b = e.target.closest('[data-cp]');
+    if (b) { closeCommandPalette(); adminTab = b.getAttribute('data-cp'); renderAdminTab(); closeAdminSide(); jumpTop(); }
+    else if (e.target === scrim) closeCommandPalette();
+  });
+  render();
+  document.getElementById('cp-q').focus();
+}
+function closeCommandPalette() {
+  const s = document.getElementById('cp-scrim');
+  if (s) { s.classList.remove('open'); setTimeout(() => s.remove(), 220); }
+  cpOpen = false;
+}
+document.addEventListener('keydown', e => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    cpOpen ? closeCommandPalette() : openCommandPalette();
+    return;
+  }
+  if (cpOpen) {
+    const scrim = document.getElementById('cp-scrim');
+    const items = (scrim || {})._items || [];
+    if (e.key === 'Escape') closeCommandPalette();
+    else if (e.key === 'ArrowDown') { e.preventDefault(); cpSel = Math.min(cpSel + 1, items.length - 1); if (scrim && scrim._render) scrim._render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); cpSel = Math.max(cpSel - 1, 0); if (scrim && scrim._render) scrim._render(); }
+    else if (e.key === 'Enter' && items[cpSel]) {
+      closeCommandPalette();
+      adminTab = items[cpSel][0]; renderAdminTab(); closeAdminSide(); jumpTop();
+    }
+    return;
+  }
+  if (e.key === '/' && !typing && document.body.classList.contains('is-admin') && adminToken) {
+    const si = document.getElementById('admin-global-search');
+    if (si) { e.preventDefault(); si.focus(); }
+  }
+});
+
+/* ---------- Loading skeletons ---------- */
+function adminSkeletonHTML() {
+  return `
+  <div class="skel-card"><div class="skel skel-line" style="width:38%"></div><div class="skel skel-line" style="width:82%"></div><div class="skel skel-line" style="width:64%"></div></div>
+  <div class="skel-card"><div class="skel skel-line" style="width:44%"></div><div class="skel skel-line" style="width:76%"></div></div>
+  <div class="skel-card"><div class="skel skel-line" style="width:30%"></div><div class="skel skel-line" style="width:88%"></div><div class="skel skel-line" style="width:58%"></div></div>`;
+}
+
+/* ============================================================
+   v6.41 — UI/UX batch 2
+   1. Notifications bell      5. Branded print invoice (also fixes
+   2. Products search/filter      the broken invoice button)
+   3. Quick actions           6. Greeting header
+   4. Undo toast on delete    7. Drag to reorder products
+   ============================================================ */
+
+/* ---------- 7. Product display order (persisted) ---------- */
+function applyProductOrder() {
+  let order = [];
+  try { order = JSON.parse(localStorage.getItem('luxe_product_order') || '[]'); } catch (e) {}
+  if (!order.length || !PRODUCTS.length) return;
+  const pos = new Map(order.map((id, i) => [Number(id), i]));
+  PRODUCTS.sort((a, b) => {
+    const pa = pos.has(Number(a.id)) ? pos.get(Number(a.id)) : 1e9;
+    const pb = pos.has(Number(b.id)) ? pos.get(Number(b.id)) : 1e9;
+    return pa - pb;
+  });
+}
+function saveProductOrder() {
+  try { localStorage.setItem('luxe_product_order', JSON.stringify(PRODUCTS.map(p => p.id))); } catch (e) {}
+}
+
+/* ---------- 4. Undo toast ---------- */
+let undoTimer = null;
+function showUndoToast(msg, onUndo) {
+  clearTimeout(undoTimer);
+  toastMsg.innerHTML = `${escapeHtml(msg)} <button class="toast-undo" id="toast-undo-btn" type="button">Undo</button>`;
+  toast.classList.add('show');
+  const close = () => { toast.classList.remove('show'); clearTimeout(undoTimer); };
+  document.getElementById('toast-undo-btn').onclick = () => { close(); onUndo(); };
+  undoTimer = setTimeout(close, 6000);
+}
+
+/* ---------- 1. Notifications ---------- */
+function notifList() {
+  const items = [];
+  const newOrders = (adminOrdersCache || []).filter(o => o.status === 'placed');
+  if (newOrders.length) items.push({ icon: 'fa-bag-shopping', text: `${newOrders.length} new order${newOrders.length === 1 ? '' : 's'} to confirm`, tab: 'orders' });
+  const pendRev = (adminReviewsCache || []).filter(r => r.status === 'pending');
+  if (pendRev.length) items.push({ icon: 'fa-star', text: `${pendRev.length} review${pendRev.length === 1 ? '' : 's'} waiting for approval`, tab: 'reviews' });
+  const openRet = (adminReturnsCache || []).filter(r => r.status === 'requested');
+  if (openRet.length) items.push({ icon: 'fa-rotate-left', text: `${openRet.length} open return request${openRet.length === 1 ? '' : 's'}`, tab: 'returns' });
+  const carts = (adminCartsCache || []).length;
+  if (carts) items.push({ icon: 'fa-cart-shopping', text: `${carts} abandoned cart${carts === 1 ? '' : 's'} to recover`, tab: 'carts' });
+  const th = Number(SETTINGS.low_stock_threshold != null && SETTINGS.low_stock_threshold !== '' ? SETTINGS.low_stock_threshold : 5);
+  const low = PRODUCTS.filter(p => (p.stock || 0) <= th).length;
+  if (low) items.push({ icon: 'fa-triangle-exclamation', text: `${low} product${low === 1 ? '' : 's'} low on stock`, tab: 'products' });
+  if ((adminMsgCache || []).length) items.push({ icon: 'fa-envelope', text: `${adminMsgCache.length} unread message${adminMsgCache.length === 1 ? '' : 's'}`, tab: 'messages' });
+  return items;
+}
+function renderNotifBell() {
+  const btn = document.getElementById('notif-bell');
+  const drop = document.getElementById('notif-drop');
+  if (!btn || !drop) return;
+  const items = notifList();
+  const badge = document.getElementById('notif-count');
+  if (badge) { badge.textContent = items.length || ''; badge.style.display = items.length ? 'flex' : 'none'; }
+  drop.innerHTML = items.length ? items.map((n, i) => `
+    <button class="nt-item" data-nt="${n.tab}"><i class="fas ${n.icon}"></i><span>${escapeHtml(n.text)}</span><i class="fas fa-chevron-right nt-go"></i></button>`).join('')
+    : '<p class="sr-empty">All caught up. Nothing needs you.</p>';
+}
+
+/* ---------- 6. Greeting ---------- */
+function greetingHTML() {
+  const now = new Date();
+  const h = now.getHours();
+  const g = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  const dateStr = now.toLocaleDateString('en-PK', { weekday: 'long', day: 'numeric', month: 'long' });
+  const todayKey = now.toLocaleDateString('en-PK', { day: 'numeric', month: 'short', year: 'numeric' });
+  const todays = (adminOrdersCache || []).filter(o => o.date === todayKey);
+  const rev = todays.reduce((s, o) => s + Number(o.total || 0), 0);
+  return `
+  <div class="ov-greet">
+    <div><p class="eyebrow" style="text-align:left;margin:0 0 4px;">${escapeHtml(dateStr)}</p><h3>${g}</h3></div>
+    <div class="ov-greet-stats"><span><b>${todays.length}</b> orders today</span><span><b>${money(rev)}</b> today</span></div>
+  </div>`;
+}
+
+/* ---------- 5. Branded print invoice (fixes missing printInvoice) ---------- */
+function printInvoice(num) {
+  const o = (adminOrdersCache || []).find(x => x.number === num);
+  if (!o) { showToast('Order not found'); return; }
+  const rows = (o.items || []).map((it, i) => `
+    <tr><td>${i + 1}</td><td>${escapeHtml(it.name)}</td><td>${it.qty || 1}</td><td style="text-align:right">${money((it.price || 0) * (it.qty || 1))}</td></tr>`).join('');
+  const w = window.open('', '_blank', 'width=820,height=950');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Invoice ${escapeHtml(o.number)}</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;color:#1a1815;padding:48px;max-width:760px;margin:0 auto}
+    .lh{text-align:center;border-bottom:2px solid #c6a15b;padding-bottom:22px;margin-bottom:28px}
+    .lh h1{font-size:34px;letter-spacing:.35em;margin-bottom:6px}.lh h1 em{color:#9a7b3f;font-style:italic;letter-spacing:.1em}
+    .lh p{font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#8b8578}
+    .meta{display:flex;justify-content:space-between;margin-bottom:28px;font-size:13.5px;line-height:1.9}
+    .meta h4{font-size:10px;letter-spacing:.25em;text-transform:uppercase;color:#9a7b3f;margin-bottom:6px}
+    table{width:100%;border-collapse:collapse;margin-bottom:26px;font-size:13.5px}
+    th{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#8b8578;text-align:left;padding:10px 8px;border-bottom:2px solid #c6a15b}
+    td{padding:12px 8px;border-bottom:1px solid #eee8d8}
+    .tot{margin-left:auto;width:280px;font-size:14px}
+    .tot div{display:flex;justify-content:space-between;padding:7px 0}
+    .tot .grand{border-top:2px solid #c6a15b;font-size:18px;font-weight:bold;padding-top:12px;margin-top:6px}
+    .ft{text-align:center;margin-top:44px;font-size:12px;color:#8b8578;letter-spacing:.12em}
+    @media print{body{padding:20px}}
+  </style></head><body>
+    <div class="lh"><h1>LUXE <em>Boutique</em></h1><p>Tax Invoice · Cash on Delivery</p></div>
+    <div class="meta">
+      <div><h4>Bill to</h4><strong>${escapeHtml(o.name || '')}</strong><br>${escapeHtml(o.address || '')}${o.city ? ', ' + escapeHtml(o.city) : ''}<br>${escapeHtml(o.phone || '')}${o.email ? '<br>' + escapeHtml(o.email) : ''}</div>
+      <div style="text-align:right"><h4>Invoice</h4><strong>${escapeHtml(o.number)}</strong><br>${escapeHtml(o.date || '')}<br>Status: ${escapeHtml((o.status || '').toUpperCase())}</div>
+    </div>
+    <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th style="text-align:right">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="tot">
+      <div><span>Subtotal</span><span>${money(o.subtotal || 0)}</span></div>
+      ${Number(o.discount || 0) > 0 ? `<div><span>Discount${o.promo ? ' (' + escapeHtml(o.promo) + ')' : ''}</span><span>−${money(o.discount)}</span></div>` : ''}
+      <div><span>Delivery</span><span>${Number(o.delivery || 0) > 0 ? money(o.delivery) : 'FREE'}</span></div>
+      <div class="grand"><span>Total</span><span>${money(o.total || 0)}</span></div>
+    </div>
+    <div class="ft"><p>Thank you for shopping with Luxe Boutique · ${escapeHtml(SETTINGS.store_phone || '')}</p><p style="margin-top:6px">7-day easy returns, no questions asked</p></div>
+  </body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(() => { w.print(); }, 500);
+}
+
+/* ---------- v6.41 delegated events ---------- */
+document.body.addEventListener('click', e => {
+  if (e.target.closest('#notif-bell')) {
+    const drop = document.getElementById('notif-drop');
+    if (drop) { renderNotifBell(); drop.classList.toggle('open'); }
+    return;
+  }
+  const nt = e.target.closest('[data-nt]');
+  if (nt) {
+    const drop = document.getElementById('notif-drop');
+    if (drop) drop.classList.remove('open');
+    adminTab = nt.getAttribute('data-nt');
+    renderAdminTab(); closeAdminSide(); jumpTop();
+    return;
+  }
+  const qa = e.target.closest('[data-qa]');
+  if (qa) {
+    const t = qa.getAttribute('data-qa');
+    adminTab = t; renderAdminTab(); closeAdminSide(); jumpTop();
+    if (t === 'products') setTimeout(() => openProductModal(null), 350);
+    if (t === 'promos') setTimeout(() => { const i = document.getElementById('promo-code-in'); if (i) i.focus(); }, 350);
+    return;
+  }
+  if (!e.target.closest('.notif-wrap')) {
+    const drop = document.getElementById('notif-drop');
+    if (drop) drop.classList.remove('open');
+  }
+});
+/* Drag to reorder products */
+let dragId = null;
+document.body.addEventListener('dragstart', e => {
+  const h = e.target.closest('[data-drag-handle]');
+  if (!h) return;
+  const row = h.closest('[data-drag-id]');
+  if (!row) return;
+  dragId = row.getAttribute('data-drag-id');
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', dragId); } catch (err) {}
+  row.classList.add('dragging');
+});
+document.body.addEventListener('dragend', () => {
+  dragId = null;
+  document.querySelectorAll('.a-product.dragging').forEach(r => r.classList.remove('dragging'));
+  document.querySelectorAll('.a-product.drop-hint').forEach(r => r.classList.remove('drop-hint'));
+});
+document.body.addEventListener('dragover', e => {
+  const row = e.target.closest && e.target.closest('[data-drag-id]');
+  if (!row || !dragId || row.getAttribute('data-drag-id') === String(dragId)) return;
+  e.preventDefault();
+  row.classList.add('drop-hint');
+});
+document.body.addEventListener('dragleave', e => {
+  const row = e.target.closest && e.target.closest('[data-drag-id]');
+  if (row) row.classList.remove('drop-hint');
+});
+document.body.addEventListener('drop', e => {
+  const row = e.target.closest && e.target.closest('[data-drag-id]');
+  if (!row || !dragId) return;
+  e.preventDefault();
+  const from = PRODUCTS.findIndex(p => String(p.id) === String(dragId));
+  const to = PRODUCTS.findIndex(p => String(p.id) === String(row.getAttribute('data-drag-id')));
+  if (from < 0 || to < 0 || from === to) return;
+  const [moved] = PRODUCTS.splice(from, 1);
+  PRODUCTS.splice(to, 0, moved);
+  saveProductOrder();
+  renderAdminTab();
+  showToast('Product order updated');
+});
+
+/* ============================================================
+   v6.42 — per-tab UI/UX pass: shared helpers
+   ============================================================ */
+/* v6.42: orders collapsible items, customer rows */
+document.body.addEventListener('click', e => {
+  const t = e.target.closest('[data-ord-items]');
+  if (t) {
+    const body = document.getElementById('oi-' + t.getAttribute('data-ord-items'));
+    if (body) { body.classList.toggle('open'); t.classList.toggle('open'); }
+    return;
+  }
+  const cr = e.target.closest('.cust-row');
+  if (cr && !e.target.closest('[data-view-order]')) {
+    const det = document.getElementById('cust-' + cr.getAttribute('data-cust'));
+    if (det) det.style.display = det.style.display === 'none' ? '' : 'none';
+    return;
+  }
+  const rvF = e.target.closest('[data-rv-filter]');
+  if (rvF) { adminReviewFilter = rvF.getAttribute('data-rv-filter'); renderAdminTab(); return; }
+  const cpC = e.target.closest('[data-copy-code]');
+  if (cpC) {
+    const code = cpC.getAttribute('data-copy-code');
+    const done = () => showToast(`"${code}" copied`);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).then(done).catch(done);
+    else done();
+    return;
+  }
+  if (e.target.closest('[data-copy-newsletter]')) {
+    const emails = (adminNlCache || []).map(x => x.email).filter(Boolean).join(', ');
+    const done = () => showToast(`${adminNlCache.length} emails copied`);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(emails).then(done).catch(done);
+    else done();
+    return;
+  }
+});
+function timeAgo(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const s = Math.max(1, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  const d = Math.floor(h / 24);
+  if (d < 30) return d + 'd ago';
+  return new Date(iso).toLocaleDateString('en-PK', { day: 'numeric', month: 'short' });
+}
+/* Reviews rating filter state */
+let adminReviewFilter = 'all';
+
+/* ============================================================
+   v6.43 — batches 3+4 (all 14)
+   ============================================================ */
+let adminLastSync = Date.now();
+let adminReportRange = 'all';
+
+/* ---------- B3-5: packing slip ---------- */
+function printPackingSlip(num) {
+  const o = (adminOrdersCache || []).find(x => x.number === num);
+  if (!o) { showToast('Order not found'); return; }
+  const rows = (o.items || []).map(it => `
+    <tr><td style="width:34px;text-align:center;font-size:18px;">☐</td><td>${escapeHtml(it.name)}</td><td style="text-align:center">${it.qty || 1}</td></tr>`).join('');
+  const w = window.open('', '_blank', 'width=760,height=900');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Packing slip ${escapeHtml(o.number)}</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;color:#1a1815;padding:44px;max-width:700px;margin:0 auto}
+    h1{font-size:26px;letter-spacing:.3em;text-align:center;margin-bottom:4px}
+    .sub{text-align:center;font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#8b8578;margin-bottom:28px}
+    .meta{border:1px solid #ddd5c0;padding:16px 20px;margin-bottom:24px;font-size:14px;line-height:1.9}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#8b8578;text-align:left;padding:10px 8px;border-bottom:2px solid #c6a15b}
+    td{padding:13px 8px;border-bottom:1px solid #eee8d8}
+    .tot{text-align:right;margin-top:18px;font-size:16px}
+    @media print{body{padding:16px}}
+  </style></head><body>
+    <h1>PACKING SLIP</h1><p class="sub">Luxe Boutique · ${escapeHtml(o.number)} · ${escapeHtml(o.date || '')}</p>
+    <div class="meta"><strong>${escapeHtml(o.name || '')}</strong> · ${escapeHtml(o.phone || '')}<br>${escapeHtml(o.address || '')}${o.city ? ', ' + escapeHtml(o.city) : ''}</div>
+    <table><thead><tr><th></th><th>Item</th><th style="text-align:center">Qty</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="tot">Total pieces: <strong>${(o.items || []).reduce((s, it) => s + (it.qty || 1), 0)}</strong> · COD ${money(o.total || 0)}</p>
+  </body></html>`);
+  w.document.close(); w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+/* ---------- B4-3: bulk invoices ---------- */
+function printBulkInvoices(nums) {
+  const orders = nums.map(n => (adminOrdersCache || []).find(x => x.number === n)).filter(Boolean);
+  if (!orders.length) { showToast('No orders selected'); return; }
+  const pages = orders.map(o => {
+    const rows = (o.items || []).map((it, i) => `
+      <tr><td>${i + 1}</td><td>${escapeHtml(it.name)}</td><td>${it.qty || 1}</td><td style="text-align:right">${money((it.price || 0) * (it.qty || 1))}</td></tr>`).join('');
+    return `<div class="inv">
+      <div class="lh"><h1>LUXE <em>Boutique</em></h1><p>Tax Invoice · Cash on Delivery</p></div>
+      <div class="meta"><div><strong>${escapeHtml(o.name || '')}</strong><br>${escapeHtml(o.address || '')}${o.city ? ', ' + escapeHtml(o.city) : ''}<br>${escapeHtml(o.phone || '')}</div>
+      <div style="text-align:right"><strong>${escapeHtml(o.number)}</strong><br>${escapeHtml(o.date || '')}</div></div>
+      <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th style="text-align:right">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="tot"><div><span>Subtotal</span><span>${money(o.subtotal || 0)}</span></div>
+      ${Number(o.discount || 0) > 0 ? `<div><span>Discount</span><span>−${money(o.discount)}</span></div>` : ''}
+      <div><span>Delivery</span><span>${Number(o.delivery || 0) > 0 ? money(o.delivery) : 'FREE'}</span></div>
+      <div class="grand"><span>Total</span><span>${money(o.total || 0)}</span></div></div>
+    </div>`;
+  }).join('');
+  const w = window.open('', '_blank', 'width=820,height=950');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Invoices (${orders.length})</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;color:#1a1815}
+    .inv{padding:48px;max-width:760px;margin:0 auto;page-break-after:always}
+    .inv:last-child{page-break-after:auto}
+    .lh{text-align:center;border-bottom:2px solid #c6a15b;padding-bottom:22px;margin-bottom:28px}
+    .lh h1{font-size:34px;letter-spacing:.35em;margin-bottom:6px}.lh h1 em{color:#9a7b3f;font-style:italic;letter-spacing:.1em}
+    .lh p{font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#8b8578}
+    .meta{display:flex;justify-content:space-between;margin-bottom:28px;font-size:13.5px;line-height:1.9}
+    table{width:100%;border-collapse:collapse;margin-bottom:26px;font-size:13.5px}
+    th{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#8b8578;text-align:left;padding:10px 8px;border-bottom:2px solid #c6a15b}
+    td{padding:12px 8px;border-bottom:1px solid #eee8d8}
+    .tot{margin-left:auto;width:280px;font-size:14px}.tot div{display:flex;justify-content:space-between;padding:7px 0}
+    .tot .grand{border-top:2px solid #c6a15b;font-size:18px;font-weight:bold;padding-top:12px;margin-top:6px}
+    @media print{.inv{padding:20px}}
+  </style></head><body>${pages}</body></html>`);
+  w.document.close(); w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+/* ---------- B4-4: pick list ---------- */
+function printPickList() {
+  const open = (adminOrdersCache || []).filter(o => o.status === 'placed' || o.status === 'confirmed');
+  if (!open.length) { showToast('No unshipped orders'); return; }
+  const agg = {};
+  open.forEach(o => (o.items || []).forEach(it => {
+    const k = it.name || 'Unknown';
+    agg[k] = (agg[k] || 0) + (it.qty || 1);
+  }));
+  const rows = Object.entries(agg).sort((a, b) => b[1] - a[1]).map(([n, q]) => `
+    <tr><td style="width:34px;text-align:center;font-size:18px;">☐</td><td>${escapeHtml(n)}</td><td style="text-align:center"><strong>${q}</strong></td></tr>`).join('');
+  const w = window.open('', '_blank', 'width=760,height=900');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Pick list</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;color:#1a1815;padding:44px;max-width:700px;margin:0 auto}
+    h1{font-size:26px;letter-spacing:.3em;text-align:center;margin-bottom:4px}
+    .sub{text-align:center;font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#8b8578;margin-bottom:28px}
+    table{width:100%;border-collapse:collapse;font-size:15px}
+    th{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#8b8578;text-align:left;padding:10px 8px;border-bottom:2px solid #c6a15b}
+    td{padding:14px 8px;border-bottom:1px solid #eee8d8}
+    @media print{body{padding:16px}}
+  </style></head><body>
+    <h1>PICK LIST</h1><p class="sub">${open.length} unshipped order${open.length === 1 ? '' : 's'} · ${escapeHtml(new Date().toLocaleDateString('en-PK', { day: 'numeric', month: 'long' }))}</p>
+    <table><thead><tr><th></th><th>Item</th><th style="text-align:center">Total qty</th></tr></thead><tbody>${rows}</tbody></table>
+  </body></html>`);
+  w.document.close(); w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+/* ---------- B4-2: timeline dots HTML ---------- */
+function orderDotsHTML(status) {
+  const steps = ['placed', 'confirmed', 'shipped', 'delivered'];
+  const idx = steps.indexOf(status || 'placed');
+  if (status === 'returned') return '';
+  return `<div class="ord-dots" title="${steps.map(capitalize).join(' → ')}">` + steps.map((s, i) =>
+    `${i ? `<span class="ord-dot-line${i <= idx ? ' done' : ''}"></span>` : ''}<span class="ord-dot${i <= idx ? ' done' : ''}" title="${capitalize(s)}"></span>`
+  ).join('') + `</div>`;
+}
+
+/* ---------- B4-1: dark mode + B4-6: density ---------- */
+function applyAdminTheme() {
+  let dark = null, compact = false;
+  try {
+    const d = localStorage.getItem('luxe_admin_dark');
+    dark = d === null ? null : d === '1';
+    compact = localStorage.getItem('luxe_admin_compact') === '1';
+  } catch (e) {}
+  if (dark === null) {
+    const h = new Date().getHours();
+    dark = h >= 20 || h < 6; /* auto dark after 8pm */
+  }
+  document.body.classList.toggle('admin-dark', dark);
+  document.body.classList.toggle('admin-compact', compact);
+  const dt = document.getElementById('admin-dark-toggle');
+  if (dt) dt.innerHTML = `<i class="fas ${dark ? 'fa-sun' : 'fa-moon'}"></i>`;
+  const dn = document.getElementById('admin-density-toggle');
+  if (dn) dn.classList.toggle('on', compact);
+}
+
+/* ---------- B3-2: sync indicator ---------- */
+function syncLabel() {
+  const el = document.getElementById('sync-time');
+  if (!el) return;
+  const mins = Math.floor((Date.now() - adminLastSync) / 60000);
+  el.textContent = mins < 1 ? 'Updated just now' : `Updated ${mins}m ago`;
+}
+setInterval(syncLabel, 30000);
+
+/* ---------- B4-5: content preview ---------- */
+function updateContentPreview() {
+  const pv = document.getElementById('cs-preview');
+  if (!pv) return;
+  const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  pv.querySelector('.pv-ann').textContent = g('cs-announcement') || 'Announcement';
+  const eb = pv.querySelector('.pv-eyebrow'); if (eb) eb.textContent = g('cs-eyebrow');
+  const h = pv.querySelector('.pv-h');
+  if (h) h.innerHTML = `${escapeHtml(g('cs-l1'))}<br><em>${escapeHtml(g('cs-l2'))}</em><br>${escapeHtml(g('cs-l3'))}`;
+}
+
+/* ---------- v6.43 delegated events ---------- */
+document.body.addEventListener('click', e => {
+  if (e.target.closest('#admin-refresh')) {
+    const b = e.target.closest('#admin-refresh');
+    b.classList.add('spinning');
+    loadAdminData();
+    setTimeout(() => b.classList.remove('spinning'), 1200);
+    return;
+  }
+  if (e.target.closest('#admin-dark-toggle')) {
+    const dark = document.body.classList.toggle('admin-dark');
+    try { localStorage.setItem('luxe_admin_dark', dark ? '1' : '0'); } catch (err) {}
+    applyAdminTheme();
+    return;
+  }
+  if (e.target.closest('#admin-density-toggle')) {
+    const c = document.body.classList.toggle('admin-compact');
+    try { localStorage.setItem('luxe_admin_compact', c ? '1' : '0'); } catch (err) {}
+    applyAdminTheme();
+    return;
+  }
+  const ps = e.target.closest('[data-print-slip]');
+  if (ps) { printPackingSlip(ps.getAttribute('data-print-slip')); return; }
+  if (e.target.id === 'bulk-print') {
+    const nums = [...document.querySelectorAll('.bulk-check:checked')].map(c => c.getAttribute('data-num'));
+    if (!nums.length) { showToast('Select at least one order'); return; }
+    printBulkInvoices(nums);
+    return;
+  }
+  if (e.target.id === 'pick-list') { printPickList(); return; }
+  const rr = e.target.closest('[data-rep-range]');
+  if (rr) { adminReportRange = rr.getAttribute('data-rep-range'); renderAdminTab(); return; }
+});
+/* B4-7: Esc closes drawer / modal / dropdown */
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const dr = document.getElementById('order-drawer');
+  if (dr && dr.classList.contains('open')) { closeOrderDrawer(); return; }
+  const pm = document.getElementById('product-modal');
+  if (pm && pm.classList.contains('open')) { closeProductModal(); return; }
+  const nd = document.getElementById('notif-drop');
+  if (nd) nd.classList.remove('open');
+});
+
+/* ============================================================
+   v6.44 — batch 5 (all 7)
+   ============================================================ */
+let adminOrderCity = 'all';
+
+/* ---------- 1. Shortcuts help modal ---------- */
+function openShortcutsModal() {
+  const scrim = document.createElement('div');
+  scrim.className = 'cf-scrim';
+  const rows = [
+    ['Ctrl / ⌘ + K', 'Command palette: jump to any tab'],
+    ['/', 'Focus global search'],
+    ['↑ ↓ + Enter', 'Navigate the command palette'],
+    ['Esc', 'Close drawer, modal, palette']
+  ];
+  scrim.innerHTML = `
+    <div class="cf-card" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div class="cf-ico"><i class="fas fa-keyboard"></i></div>
+      <h3>Keyboard shortcuts</h3>
+      <div style="text-align:left;margin-bottom:24px;">${rows.map(([k, d]) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 2px;border-bottom:1px solid #262219;">
+          <span style="color:#a89f8d;font-size:13.5px;">${d}</span><span class="kbd" style="background:#1e1a12;border-color:#2a251c;color:#c6a15b;">${k}</span>
+        </div>`).join('')}</div>
+      <div class="cf-actions"><button class="cf-btn primary" data-cf="ok">Got it</button></div>
+    </div>`;
+  document.body.appendChild(scrim);
+  requestAnimationFrame(() => scrim.classList.add('open'));
+  const done = () => { scrim.classList.remove('open'); setTimeout(() => scrim.remove(), 280); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') done(); };
+  document.addEventListener('keydown', onKey);
+  scrim.addEventListener('click', e => { if (e.target === scrim || e.target.closest('[data-cf]')) done(); });
+  scrim.querySelector('[data-cf]').focus();
+}
+
+/* ---------- 3. Shipping label ---------- */
+function printShipLabel(num) {
+  const o = (adminOrdersCache || []).find(x => x.number === num);
+  if (!o) { showToast('Order not found'); return; }
+  const pieces = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
+  const w = window.open('', '_blank', 'width=640,height=560');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Label ${escapeHtml(o.number)}</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;color:#111;padding:28px;max-width:480px;margin:0 auto}
+    .lab{border:3px solid #111;padding:26px}
+    .brand{text-align:center;font-size:15px;letter-spacing:.4em;margin-bottom:4px}
+    .ord{text-align:center;font-size:13px;letter-spacing:.15em;margin-bottom:18px;color:#555}
+    .to{font-size:11px;letter-spacing:.25em;color:#777;margin-bottom:6px}
+    .name{font-size:24px;font-weight:800;margin-bottom:6px}
+    .addr{font-size:16px;line-height:1.6;margin-bottom:16px}
+    .phone{font-size:20px;font-weight:700;margin-bottom:18px}
+    .cod{display:flex;justify-content:space-between;align-items:center;border-top:2px dashed #999;padding-top:16px}
+    .cod .amt{font-size:30px;font-weight:900}
+    .cod .pc{font-size:14px;color:#555}
+    @media print{body{padding:0}}
+  </style></head><body><div class="lab">
+    <div class="brand">LUXE BOUTIQUE</div><div class="ord">${escapeHtml(o.number)}</div>
+    <div class="to">SHIP TO</div>
+    <div class="name">${escapeHtml(o.name || '')}</div>
+    <div class="addr">${escapeHtml(o.address || '')}${o.city ? '<br>' + escapeHtml(o.city) : ''}</div>
+    <div class="phone">${escapeHtml(o.phone || '')}</div>
+    <div class="cod"><span class="pc">${pieces} piece${pieces === 1 ? '' : 's'}</span><span class="amt">COD ${money(o.total || 0)}</span></div>
+  </div></body></html>`);
+  w.document.close(); w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+/* ---------- 2. WhatsApp order templates ---------- */
+const WA_TEMPLATES = {
+  shipped: o => `Assalam-o-Alaikum ${o.name || ''}! Your Luxe Boutique order ${o.number} has been SHIPPED and is on its way. The rider will call you on delivery. COD amount: ${money(o.total || 0)}. Thank you for shopping with us!`,
+  ontheway: o => `Assalam-o-Alaikum ${o.name || ''}! Your Luxe Boutique order ${o.number} is OUT FOR DELIVERY today. Please keep ${money(o.total || 0)} ready (COD) and keep your phone nearby.`,
+  delivered: o => `Assalam-o-Alaikum ${o.name || ''}! Your Luxe Boutique order ${o.number} was delivered. We hope you love it! Please share your feedback — it means the world to us.`
+};
+function waTemplateLink(o, kind) {
+  const base = waLink(o);
+  if (!base) return '';
+  return base + '?text=' + encodeURIComponent(WA_TEMPLATES[kind](o));
+}
+
+/* ---------- 4. Full backup ---------- */
+function downloadBackup() {
+  const data = {
+    exported_at: new Date().toISOString(),
+    products: PRODUCTS,
+    orders: adminOrdersCache || [],
+    promos: adminPromoCache || [],
+    settings: SETTINGS,
+    newsletter: adminNlCache || [],
+    messages: adminMsgCache || [],
+    reviews: adminReviewsCache || [],
+    returns: adminReturnsCache || [],
+    carts: adminCartsCache || []
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `luxe-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  showToast('Backup downloaded');
+}
+
+/* ---------- 5. Duplicate product ---------- */
+function duplicateProduct(id) {
+  const p = PRODUCTS.find(x => String(x.id) === String(id));
+  if (!p) return;
+  const copy = { ...p };
+  delete copy.id;
+  copy.name = (p.name || 'Product') + ' (Copy)';
+  copy.stock = 0;
+  showToast('Duplicating…');
+  DB.createProduct(copy, adminToken)
+    .then(() => DB.getProducts())
+    .then(ps => { PRODUCTS = ps; applyProductOrder(); showToast('Product duplicated'); loadAdminData(); })
+    .catch(() => showToast('Duplicate failed'));
+}
+
+/* ---------- 7b. Sparkline ---------- */
+function sparkSVG(vals, w, h, color) {
+  if (!vals.length) return '';
+  const max = Math.max(...vals, 1);
+  const bw = w / vals.length;
+  const bars = vals.map((v, i) => {
+    const bh = Math.max(2, Math.round(v / max * (h - 4)));
+    return `<rect x="${(i * bw + 1).toFixed(1)}" y="${h - bh}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${bh}" rx="1" fill="${color}"/>`;
+  }).join('');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">${bars}</svg>`;
+}
+
+/* ---------- v6.44 delegated events ---------- */
+document.body.addEventListener('click', e => {
+  if (e.target.closest('#shortcuts-btn')) { openShortcutsModal(); return; }
+  const sl = e.target.closest('[data-print-label]');
+  if (sl) { printShipLabel(sl.getAttribute('data-print-label')); return; }
+  if (e.target.closest('#backup-btn')) { downloadBackup(); return; }
+  const dp = e.target.closest('[data-dup-product]');
+  if (dp) {
+    const id = dp.getAttribute('data-dup-product');
+    const p = PRODUCTS.find(x => String(x.id) === String(id));
+    confirmModal('Duplicate product', `Create a copy of "${p ? p.name : id}"?`, 'Duplicate', false)
+      .then(ok => { if (ok) duplicateProduct(id); });
+    return;
+  }
+});
+
+/* ============================================================
+   v6.45 — batches 6+7 (all 14)
+   ============================================================ */
+
+/* ---------- 6. Sound toggle ---------- */
+function soundOn() {
+  try { return localStorage.getItem('luxe_sound') !== '0'; } catch (e) { return true; }
+}
+const _playAlertSound = playAlertSound;
+playAlertSound = function () { if (soundOn()) _playAlertSound(); };
+
+/* ---------- 8. Item thumbnails ---------- */
+function itemThumbHTML(it) {
+  const p = (typeof PRODUCTS !== 'undefined' ? PRODUCTS : []).find(x => Number(x.id) === Number(it.id));
+  return p && p.image ? `<img class="ord-thumb" src="${p.image}" alt="" loading="lazy" />` : '';
+}
+
+/* ---------- 7. Daily summary print ---------- */
+function printDailySummary() {
+  const todayKey = new Date().toLocaleDateString('en-PK', { day: 'numeric', month: 'short', year: 'numeric' });
+  const todays = (adminOrdersCache || []).filter(o => o.date === todayKey);
+  const rev = todays.reduce((s, o) => s + Number(o.total || 0), 0);
+  const units = todays.reduce((s, o) => s + (o.items || []).reduce((a, it) => a + (it.qty || 1), 0), 0);
+  const byStatus = {};
+  todays.forEach(o => { byStatus[o.status || 'placed'] = (byStatus[o.status || 'placed'] || 0) + 1; });
+  const rows = todays.map((o, i) => `
+    <tr><td>${i + 1}</td><td>${escapeHtml(o.number)}</td><td>${escapeHtml(o.name || '')}</td><td>${escapeHtml(o.city || '')}</td><td>${capitalize(o.status || 'placed')}</td><td style="text-align:right">${money(o.total || 0)}</td></tr>`).join('');
+  const w = window.open('', '_blank', 'width=820,height=950');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Daily summary ${escapeHtml(todayKey)}</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;color:#1a1815;padding:44px;max-width:780px;margin:0 auto}
+    h1{font-size:28px;letter-spacing:.3em;text-align:center;margin-bottom:4px}
+    .sub{text-align:center;font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#8b8578;margin-bottom:28px}
+    .kpis{display:flex;gap:16px;margin-bottom:28px}
+    .kpi{flex:1;border:1px solid #ddd5c0;padding:16px;text-align:center}
+    .kpi b{font-size:24px;display:block}.kpi span{font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:#8b8578}
+    table{width:100%;border-collapse:collapse;font-size:13.5px}
+    th{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#8b8578;text-align:left;padding:10px 8px;border-bottom:2px solid #c6a15b}
+    td{padding:11px 8px;border-bottom:1px solid #eee8d8}
+    @media print{body{padding:16px}}
+  </style></head><body>
+    <h1>DAILY SUMMARY</h1><p class="sub">Luxe Boutique · ${escapeHtml(todayKey)}</p>
+    <div class="kpis">
+      <div class="kpi"><b>${todays.length}</b><span>Orders</span></div>
+      <div class="kpi"><b>${money(rev)}</b><span>Revenue</span></div>
+      <div class="kpi"><b>${units}</b><span>Units</span></div>
+      <div class="kpi"><b>${money(rev)}</b><span>COD to collect</span></div>
+    </div>
+    ${Object.keys(byStatus).length ? `<p style="margin-bottom:16px;font-size:13px;color:#555;">By status: ${Object.entries(byStatus).map(([s, n]) => `${capitalize(s)} (${n})`).join(' · ')}</p>` : ''}
+    <table><thead><tr><th>#</th><th>Order</th><th>Customer</th><th>City</th><th>Status</th><th style="text-align:right">Total</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:#999;">No orders today.</td></tr>'}</tbody></table>
+  </body></html>`);
+  w.document.close(); w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+/* ---------- 12. Customer statement ---------- */
+function printCustomerStatement(key) {
+  const orders = (adminOrdersCache || []).filter(o => {
+    const k = String(o.phone || '').replace(/\D/g, '') || String(o.email || '').toLowerCase();
+    return k === key;
+  });
+  if (!orders.length) { showToast('No orders found'); return; }
+  const first = orders[0];
+  const spent = orders.reduce((s, o) => s + Number(o.total || 0), 0);
+  const rows = orders.map((o, i) => `
+    <tr><td>${i + 1}</td><td>${escapeHtml(o.number)}</td><td>${escapeHtml(o.date || '')}</td><td>${capitalize(o.status || 'placed')}</td><td>${(o.items || []).reduce((s, it) => s + (it.qty || 1), 0)}</td><td style="text-align:right">${money(o.total || 0)}</td></tr>`).join('');
+  const w = window.open('', '_blank', 'width=820,height=950');
+  if (!w) { showToast('Popup blocked: allow popups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Statement</title><style>
+    *{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;color:#1a1815;padding:44px;max-width:780px;margin:0 auto}
+    h1{font-size:24px;letter-spacing:.25em;text-align:center;margin-bottom:4px}
+    .sub{text-align:center;font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#8b8578;margin-bottom:28px}
+    .meta{border:1px solid #ddd5c0;padding:16px 20px;margin-bottom:24px;font-size:14px;line-height:1.9}
+    table{width:100%;border-collapse:collapse;font-size:13.5px}
+    th{font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:#8b8578;text-align:left;padding:10px 8px;border-bottom:2px solid #c6a15b}
+    td{padding:11px 8px;border-bottom:1px solid #eee8d8}
+    .tot{text-align:right;margin-top:16px;font-size:18px}
+    @media print{body{padding:16px}}
+  </style></head><body>
+    <h1>CUSTOMER STATEMENT</h1><p class="sub">Luxe Boutique</p>
+    <div class="meta"><strong>${escapeHtml(first.name || '')}</strong><br>${escapeHtml(first.phone || '')}${first.email ? ' · ' + escapeHtml(first.email) : ''}</div>
+    <table><thead><tr><th>#</th><th>Order</th><th>Date</th><th>Status</th><th>Items</th><th style="text-align:right">Total</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="tot">Lifetime value: <strong>${money(spent)}</strong> across ${orders.length} order${orders.length === 1 ? '' : 's'}</p>
+  </body></html>`);
+  w.document.close(); w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+/* ---------- 1. Guided tour ---------- */
+const TOUR_STEPS = [
+  { sel: '[data-atab="overview"]', title: 'Overview', text: 'Your sales analytics: revenue, trends, top products and low-stock alerts.' },
+  { sel: '[data-atab="orders"]', title: 'Orders', text: 'Manage orders: update status, WhatsApp customers, print invoices, bulk actions.' },
+  { sel: '[data-atab="products"]', title: 'Products', text: 'Stock controls, drag to reorder, search and bulk price updates.' },
+  { sel: '#admin-global-search', title: 'Global search', text: 'Find any order, product or customer instantly. Press / anywhere.' },
+  { sel: '#notif-bell', title: 'Notifications', text: 'New orders, pending reviews, returns and low stock, all in one place.' },
+  { sel: '#cp-open', title: 'Command palette', text: 'Press Ctrl+K to jump to any tab without touching the mouse.' }
+];
+let tourIdx = -1;
+function startTour() {
+  if (!document.body.classList.contains('is-admin')) return;
+  tourIdx = 0;
+  renderTourStep();
+}
+function endTour() {
+  tourIdx = -1;
+  document.querySelectorAll('.tour-hl').forEach(el => el.classList.remove('tour-hl'));
+  const t = document.getElementById('tour-ui');
+  if (t) t.remove();
+  try { localStorage.setItem('luxe_tour_done', '1'); } catch (e) {}
+}
+function renderTourStep() {
+  document.querySelectorAll('.tour-hl').forEach(el => el.classList.remove('tour-hl'));
+  let ui = document.getElementById('tour-ui');
+  if (ui) ui.remove();
+  if (tourIdx < 0 || tourIdx >= TOUR_STEPS.length) { endTour(); return; }
+  const st = TOUR_STEPS[tourIdx];
+  const el = document.querySelector(st.sel);
+  if (!el) { tourIdx++; renderTourStep(); return; }
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.add('tour-hl');
+  setTimeout(() => {
+    const r = el.getBoundingClientRect();
+    ui = document.createElement('div');
+    ui.id = 'tour-ui';
+    const below = r.bottom + 16 + 190 < window.innerHeight;
+    ui.style.top = (below ? r.bottom + 14 : Math.max(12, r.top - 204)) + 'px';
+    ui.style.left = Math.max(12, Math.min(window.innerWidth - 332, r.left)) + 'px';
+    ui.innerHTML = `
+      <div class="tour-card">
+        <p class="tour-step">${tourIdx + 1} of ${TOUR_STEPS.length}</p>
+        <h4>${st.title}</h4>
+        <p>${st.text}</p>
+        <div class="tour-actions">
+          <button class="cf-btn" id="tour-skip">Skip</button>
+          <button class="cf-btn primary" id="tour-next">${tourIdx === TOUR_STEPS.length - 1 ? 'Finish' : 'Next'}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ui);
+    document.getElementById('tour-next').onclick = () => { tourIdx++; renderTourStep(); };
+    document.getElementById('tour-skip').onclick = endTour;
+  }, 350);
+}
+
+/* ---------- v6.45 delegated events ---------- */
+document.body.addEventListener('click', e => {
+  if (e.target.closest('#sound-toggle')) {
+    const off = !soundOn();
+    try { localStorage.setItem('luxe_sound', off ? '0' : '1'); } catch (err) {}
+    const b = document.getElementById('sound-toggle');
+    if (b) b.innerHTML = `<i class="fas ${off ? 'fa-volume-xmark' : 'fa-volume-high'}"></i>`;
+    showToast(off ? 'Order sound off' : 'Order sound on');
+    return;
+  }
+  if (e.target.closest('#store-toggle')) {
+    const open = isStoreOpen();
+    const val = open ? '0' : '1';
+    DB.saveSetting('store_open', val, adminToken)
+      .then(() => DB.getSettings().catch(() => null))
+      .then(s => { if (s) SETTINGS = { ...SETTINGS, ...s }; applySettings(); updateStoreToggle(); showToast(open ? 'Store is CLOSED' : 'Store is OPEN'); })
+      .catch(() => showToast('Save failed'));
+    return;
+  }
+  if (e.target.closest('#daily-summary-btn')) { printDailySummary(); return; }
+  if (e.target.closest('#tour-replay')) { startTour(); return; }
+  const ca = e.target.closest('[data-copy-addr]');
+  if (ca) {
+    const txt = ca.getAttribute('data-copy-addr');
+    const done = () => showToast('Address copied');
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(done);
+    else done();
+    return;
+  }
+  const cst = e.target.closest('[data-cust-stmt]');
+  if (cst) { printCustomerStatement(cst.getAttribute('data-cust-stmt')); return; }
+});
+function updateStoreToggle() {
+  const b = document.getElementById('store-toggle');
+  if (!b) return;
+  const open = isStoreOpen();
+  b.innerHTML = `<i class="fas ${open ? 'fa-door-open' : 'fa-door-closed'}"></i>`;
+  b.title = open ? 'Store is OPEN — click to close' : 'Store is CLOSED — click to open';
+  b.classList.toggle('store-closed', !open);
+}
 
 // ---------- DOM ----------
 const mainContent = document.getElementById('main-content');
@@ -581,7 +2086,7 @@ function deliveryFeeFor(city) {
   if (city && cities[city] != null) return Number(cities[city]) || 0;
   return baseDeliveryFee();
 }
-function cartDelivery() { return deliveryFeeFor(checkoutCity); }
+function cartDelivery() { if (freeShipActive()) return 0; return deliveryFeeFor(checkoutCity); }
 function isStoreOpen() { return SETTINGS.store_open !== '0'; }
 function cartQty() { return cartContents.reduce((s, l) => s + l.qty, 0); }
 async function applyPromo(code) {
@@ -709,12 +2214,12 @@ function runPreloader(done) {
   };
   let p = 0;
   const t = setInterval(() => {
-    p = Math.min(100, p + Math.random() * 22);
+    p = Math.min(100, p + Math.random() * 34);
     bar.style.transform = `scaleX(${p / 100})`;
     pct.textContent = String(Math.floor(p)).padStart(2, '0');
-    if (p >= 100) { clearInterval(t); setTimeout(finish, 250); }
-  }, 130);
-  setTimeout(() => { clearInterval(t); finish(); }, 3200); // hard fallback
+    if (p >= 100) { clearInterval(t); setTimeout(finish, 100); }
+  }, 90);
+  setTimeout(() => { clearInterval(t); finish(); }, 800); // hard fallback: storefront visible within ~1.2s max
 }
 
 // ---------- Recently viewed ----------
@@ -1005,6 +2510,7 @@ async function renderProductDetail(id) {
         </div>
       </div>
     </section>
+    <section class="rv-sec" id="pdp-reviews" aria-label="Customer reviews"></section>
     <section class="related">
       <div class="section-head"><p class="eyebrow">Continue exploring</p><h2>You May Also <em>Adore</em></h2></div>
       <div class="cards">${related.map(cardHTML).join('')}</div>
@@ -1017,6 +2523,7 @@ async function renderProductDetail(id) {
   document.getElementById('qty-minus').addEventListener('click', () => { qtyInput.value = Math.max(1, parseInt(qtyInput.value, 10) - 1); });
   document.getElementById('qty-plus').addEventListener('click', () => { qtyInput.value = Math.min(maxQty, parseInt(qtyInput.value, 10) + 1); });
   document.getElementById('pdp-add').addEventListener('click', () => addToCart(p.id, parseInt(qtyInput.value, 10) || 1));
+  loadPdpReviews(p.id);
   const mainImg = document.getElementById('pdp-main-img');
   // Circular magnifier lens on the main image (desktop hover only)
   const pdpFrame = mainImg.closest('.frame');
@@ -1141,7 +2648,12 @@ function orderTimelineHTML(order) {
     </ul>
     ${order.discount > 0 ? `<div class="sum-row"><span>Promo ${escapeHtml(order.promo || '')} (−${order.subtotal ? Math.round(order.discount / order.subtotal * 100) : 0}%)</span><span>−${money(order.discount)}</span></div>` : ''}
     ${(order.delivery || 0) > 0 ? `<div class="sum-row"><span>Delivery</span><span>${money(order.delivery)}</span></div>` : ''}
-    <div class="sum-row grand" style="border-top:1px solid var(--line);padding-top:16px;"><span>Total (COD)</span><span>${money(order.total)}</span></div>`;
+    <div class="sum-row grand" style="border-top:1px solid var(--line);padding-top:16px;"><span>Total (COD)</span><span>${money(order.total)}</span></div>
+    ${['shipped', 'delivered'].includes(order.status) ? `
+    <div style="margin-top:22px;text-align:center;">
+      <button class="btn-line" data-req-return="${escapeHtml(order.number)}" data-rname="${escapeHtml(order.name || '')}" data-rphone="${escapeHtml(order.phone || '')}">Request Return</button>
+      <div id="return-box"></div>
+    </div>` : ''}`;
 }
 
 function renderCheckout() {
@@ -1163,13 +2675,14 @@ function renderCheckout() {
   <section class="page-body">
     <div class="paper" data-reveal>
       <div class="cod-line"><i class="fas fa-money-bill-wave"></i><span><strong>Cash on Delivery.</strong> Pay in cash when your order arrives, no advance payment, no cards.</span></div>
+      ${freeShipBarHTML()}
       <div class="sum">
         <ul class="o-lines">
           ${cartContents.map(l => `<li><span>${escapeHtml(l.name)} <em>× ${l.qty}</em></span><span>${money(l.price * l.qty)}</span></li>`).join('')}
         </ul>
         <div class="sum-row"><span>Subtotal</span><span id="sum-subtotal">${money(cartSubtotal())}</span></div>
         <div class="sum-row" id="sum-promo-row" style="${promoCode ? '' : 'display:none;'}"><span id="sum-promo-label">Promo ${escapeHtml(promoCode)} (−${promoPctLabel(promoCode)}%) <button type="button" id="promo-remove" class="link-btn">remove</button></span><span id="sum-discount">−${money(cartDiscount())}</span></div>
-        <div class="sum-row"><span>Delivery</span><span id="sum-delivery">${money(cartDelivery())}</span></div>
+        <div class="sum-row"><span>Delivery</span><span id="sum-delivery">${deliveryRowHTML()}</span></div>
         <div class="sum-row grand"><span>Total</span><span id="sum-grand">${money(cartTotal())}</span></div>
       </div>
       <div class="promo-field">
@@ -1194,6 +2707,7 @@ function renderCheckout() {
       </form>
     </div>
   </section>`;
+  armAbandonedCapture();
 }
 
 function refreshCheckoutTotals() {
@@ -1211,7 +2725,7 @@ function refreshCheckoutTotals() {
   document.getElementById('sum-subtotal').textContent = money(cartSubtotal());
   document.getElementById('sum-grand').textContent = money(cartTotal());
   const delEl = document.getElementById('sum-delivery');
-  if (delEl) delEl.textContent = money(cartDelivery());
+  if (delEl) delEl.innerHTML = deliveryRowHTML();
   document.getElementById('place-order-btn').textContent = `Place Order: ${money(cartTotal())} COD`;
 }
 
@@ -1310,7 +2824,7 @@ function updateCart() {
   cartTotalEl.textContent = money(total).replace('Rs. ', '');
   cartItemsEl.innerHTML = cartContents.length === 0
     ? '<p class="d-empty">Your bag is empty.<br />Beautiful things await.</p>'
-    : cartContents.map(l => `
+    : freeShipBarHTML() + cartContents.map(l => `
       <div class="d-item">
         <img src="${l.image}" alt="${escapeHtml(l.name)}" loading="lazy" decoding="async" />
         <div class="d-info">
@@ -1482,6 +2996,8 @@ let adminPromoCache = [];
 let adminMsgCache = [];
 let adminOrderFilter = 'all';
 let adminOrderSearch = '';
+let adminProductSearch = '';
+let adminProductCat = 'all';
 
 function renderAdmin() {
   stopPageFx();
@@ -1519,27 +3035,26 @@ function renderAdmin() {
     return;
   }
 
-  const navItems = [
-    ['overview', 'Overview', 'fa-chart-pie'],
-    ['orders', 'Orders', 'fa-bag-shopping'],
-    ['products', 'Products', 'fa-gem'],
-    ['customers', 'Customers', 'fa-users'],
-    ['promos', 'Promos', 'fa-tag'],
-    ['content', 'Content', 'fa-pen-nib'],
-    ['messages', 'Messages', 'fa-envelope'],
-    ['newsletter', 'Newsletter', 'fa-paper-plane'],
-    ['settings', 'Settings', 'fa-gear']
+  const navGroups = [
+    ['Sales', [['overview', 'Overview', 'fa-chart-pie'], ['orders', 'Orders', 'fa-bag-shopping'], ['returns', 'Returns', 'fa-rotate-left'], ['carts', 'Carts', 'fa-cart-shopping'], ['reports', 'Reports', 'fa-chart-line']]],
+    ['Catalog', [['products', 'Products', 'fa-gem'], ['reviews', 'Reviews', 'fa-star']]],
+    ['People', [['customers', 'Customers', 'fa-users'], ['messages', 'Messages', 'fa-envelope'], ['newsletter', 'Newsletter', 'fa-paper-plane']]],
+    ['Marketing', [['promos', 'Promos', 'fa-tag'], ['content', 'Content', 'fa-pen-nib']]],
+    ['System', [['settings', 'Settings', 'fa-gear']]]
   ];
+  const navFlat = navGroups.flatMap(g => g[1]);
   mainContent.innerHTML = `
   <section class="admin-shell">
     <div class="admin-scrim" id="admin-scrim"></div>
     <aside class="admin-side" id="admin-side">
       <div class="admin-brand"><span class="ab-luxe">LUXE</span><span class="ab-sub">BOUTIQUE · ATELIER</span></div>
       <nav class="admin-nav">
-        ${navItems.map(([k, l, ic]) => `
-        <button data-atab="${k}" class="${k === adminTab ? 'active' : ''}">
-          <i class="fas ${ic}"></i><span>${l}</span><em class="nav-badge" data-navbadge="${k}"></em>
-        </button>`).join('')}
+        ${navGroups.map(([g, items]) => `
+          <p class="an-group">${g}</p>
+          ${items.map(([k, l, ic]) => `
+          <button data-atab="${k}" class="${k === adminTab ? 'active' : ''}">
+            <i class="fas ${ic}"></i><span>${l}</span><em class="nav-badge" data-navbadge="${k}"></em>
+          </button>`).join('')}`).join('')}
       </nav>
       <div class="admin-side-foot">
         <a href="#/" class="as-link"><i class="fas fa-store"></i><span>View store</span></a>
@@ -1549,17 +3064,30 @@ function renderAdmin() {
     <div class="admin-main">
       <header class="admin-topbar">
         <button id="admin-menu-btn" aria-label="Menu"><i class="fas fa-bars"></i></button>
-        <h2 id="admin-page-title">${navItems.find(n => n[0] === adminTab)?.[1] || 'Overview'}</h2>
+        <h2 id="admin-page-title">${navFlat.find(n => n[0] === adminTab)?.[1] || 'Overview'}</h2>
         <div class="admin-topbar-right">
           <div class="admin-search">
             <i class="fas fa-search"></i>
-            <input id="admin-global-search" type="search" placeholder="Search orders, products, customers…" autocomplete="off" aria-label="Global search" />
+            <input id="admin-global-search" type="search" placeholder="Search orders, products, customers…  ( / )" autocomplete="off" aria-label="Global search" />
             <div id="admin-search-results"></div>
           </div>
+          <button class="d-mini" id="cp-open" title="Quick navigation (Ctrl+K)" style="white-space:nowrap;"><i class="fas fa-bolt"></i> <span class="kbd">Ctrl K</span></button>
+          <div class="notif-wrap">
+            <button class="d-mini notif-bell" id="notif-bell" title="Notifications" aria-label="Notifications"><i class="fas fa-bell"></i><span class="notif-count" id="notif-count" style="display:none;"></span></button>
+            <div class="notif-drop" id="notif-drop"></div>
+          </div>
+          <div class="sync-ind"><span class="dot"></span><span class="txt" id="sync-time">Updated just now</span></div>
+          <button class="d-mini" id="admin-refresh" title="Refresh data"><i class="fas fa-rotate"></i></button>
+          <button class="d-mini" id="admin-dark-toggle" title="Dark mode"><i class="fas fa-moon"></i></button>
+          <button class="d-mini" id="shortcuts-btn" title="Keyboard shortcuts"><span class="kbd">?</span></button>
+          <button class="d-mini" id="sound-toggle" title="Order alert sound"><i class="fas fa-volume-high"></i></button>
+          <button class="d-mini" id="store-toggle" title="Store open/closed"><i class="fas fa-door-open"></i></button>
+          <button class="d-mini" id="daily-summary-btn" title="Print today's summary"><i class="fas fa-calendar-day"></i></button>
+          <a class="d-mini" href="./" target="_blank" rel="noopener" title="View store"><i class="fas fa-store"></i></a>
           <span class="admin-mode ${USE_SUPABASE ? 'live' : ''}">${USE_SUPABASE ? '● Live' : '● Demo'}</span>
         </div>
       </header>
-      <div class="admin-body" id="admin-content"><p class="d-empty">Loading…</p></div>
+      <div class="admin-body" id="admin-content"><div id="admin-skel">${adminSkeletonHTML()}</div></div>
     </div>
   </section>
   <div class="order-drawer-scrim" id="order-drawer-scrim"></div>
@@ -1673,10 +3201,15 @@ async function loadAdminData() {
     adminNlCache = nl;
     adminPromoCache = promos;
     adminMsgCache = msgs;
+    await reloadAdminExtra().catch(() => {});
     lastOrderCount = (orders || []).length;
+    adminLastSync = Date.now();
     startOrderPolling();
     renderAdminStats();
     renderAdminTab();
+    try {
+      if (!localStorage.getItem('luxe_tour_done')) setTimeout(startTour, 900);
+    } catch (e) {}
   } catch (err) {
     const msg = err.message || 'Unknown error';
     if (/401|403/.test(msg)) {
@@ -1701,7 +3234,7 @@ function renderAdminStats() {
     <div class="a-stat"><b>${adminNlCache.length}</b><span>Newsletter</span></div>`;
 }
 
-const ADMIN_TITLES = { overview: 'Overview', orders: 'Orders', products: 'Products', customers: 'Customers', promos: 'Promos', content: 'Content', messages: 'Messages', newsletter: 'Newsletter', settings: 'Settings' };
+const ADMIN_TITLES = { overview: 'Overview', orders: 'Orders', returns: 'Returns', carts: 'Abandoned Carts', products: 'Products', reviews: 'Reviews', customers: 'Customers', promos: 'Promos', reports: 'Reports', content: 'Content', messages: 'Messages', newsletter: 'Newsletter', settings: 'Settings' };
 function closeAdminSide() {
   const s = document.getElementById('admin-side'), sc = document.getElementById('admin-scrim');
   if (s) s.classList.remove('open');
@@ -1715,6 +3248,9 @@ function updateNavBadges() {
   set('orders', (adminOrdersCache || []).filter(o => o.status === 'placed').length);
   set('messages', (adminMsgCache || []).length);
   set('products', PRODUCTS.filter(p => (p.stock || 0) <= 5).length);
+  set('reviews', (adminReviewsCache || []).filter(r => r.status === 'pending').length);
+  set('carts', (adminCartsCache || []).length);
+  set('returns', (adminReturnsCache || []).filter(r => r.status === 'requested').length);
 }
 function renderAdminTab() {
   const box = document.getElementById('admin-content');
@@ -1723,12 +3259,17 @@ function renderAdminTab() {
   const pt = document.getElementById('admin-page-title');
   if (pt) pt.textContent = ADMIN_TITLES[adminTab] || 'Overview';
   updateNavBadges();
+  renderNotifBell();
   try {
     if (adminTab === 'overview') box.innerHTML = overviewTabHTML();
     else if (adminTab === 'orders') box.innerHTML = ordersTabHTML();
+    else if (adminTab === 'returns') box.innerHTML = returnsTabHTML();
+    else if (adminTab === 'carts') box.innerHTML = cartsTabHTML();
     else if (adminTab === 'products') box.innerHTML = productsTabHTML();
+    else if (adminTab === 'reviews') box.innerHTML = reviewsTabHTML();
     else if (adminTab === 'customers') box.innerHTML = customersTabHTML();
     else if (adminTab === 'promos') box.innerHTML = promosTabHTML();
+    else if (adminTab === 'reports') box.innerHTML = reportsTabHTML();
     else if (adminTab === 'content') box.innerHTML = contentTabHTML();
     else if (adminTab === 'messages') box.innerHTML = messagesTabHTML();
     else if (adminTab === 'settings') box.innerHTML = settingsTabHTML();
@@ -1738,6 +3279,25 @@ function renderAdminTab() {
     box.innerHTML = `<p class="d-empty">Couldn't load this section (${escapeHtml(err.message)}). Try refreshing the page.</p>`;
   }
   if (adminTab === 'overview') { animateCountUp(); bindChartTooltip(); }
+  if (adminTab === 'content') updateContentPreview();
+  if (adminTab === 'settings') loadLoginHistory();
+  applyAdminTheme();
+  updateStoreToggle();
+  const sb2 = document.getElementById('sound-toggle');
+  if (sb2) sb2.innerHTML = `<i class="fas ${soundOn() ? 'fa-volume-high' : 'fa-volume-xmark'}"></i>`;
+  syncLabel();
+}
+
+// ---------- Admin login history (v6.51) ----------
+function loadLoginHistory() {
+  const box = document.getElementById('login-history');
+  if (!box) return;
+  DB.getAdminVisits(adminToken).then(rows => {
+    if (!rows || !rows.length) { box.innerHTML = '<p class="a-order-meta">No logins recorded yet.</p>'; return; }
+    box.innerHTML = '<ul class="ov-list">' + rows.map(v =>
+      `<li><span>${escapeHtml(v.email || '—')}</span><span class="a-order-meta">${timeAgo(v.created_at)}</span></li>`
+    ).join('') + '</ul>';
+  }).catch(() => { box.innerHTML = '<p class="a-order-meta">Could not load login history.</p>'; });
 }
 
 // ---------- Overview / analytics 2.0 ----------
@@ -1931,6 +3491,13 @@ function overviewTabHTML() {
   ];
   const goalPct = d.salesGoal > 0 ? d.monthRev / d.salesGoal * 100 : 0;
   return `
+  ${greetingHTML()}
+  <div class="qa-row">
+    <button class="d-mini" data-qa="products"><i class="fas fa-plus"></i> Add product</button>
+    <button class="d-mini" data-qa="promos"><i class="fas fa-tag"></i> New promo</button>
+    <button class="d-mini" data-qa="orders"><i class="fas fa-bag-shopping"></i> View orders</button>
+    <button class="d-mini" data-qa="reports"><i class="fas fa-chart-line"></i> Reports</button>
+  </div>
   <div class="ov-range" role="tablist" aria-label="Date range">
     ${ranges.map(([v, l]) => `<button class="${overviewRange === v ? 'active' : ''}" data-ov-range="${v}">${l}</button>`).join('')}
   </div>
@@ -1979,7 +3546,7 @@ function overviewTabHTML() {
     <div class="ov-panel">
       <h4>Recent orders</h4>
       ${d.recent.length ? `<ul class="ov-list">${d.recent.map(({ o }) => `
-        <li><span><strong>${escapeHtml(o.number)}</strong><span class="a-order-meta"> · ${escapeHtml(o.name || '-')}</span></span>
+        <li class="ov-clickable" data-view-order="${escapeHtml(o.number)}" title="Open order"><span><strong>${escapeHtml(o.number)}</strong><span class="a-order-meta"> · ${escapeHtml(o.name || '-')}</span></span>
         <span class="ov-recent-right"><span class="a-status ${o.status} sm">${capitalize(o.status || 'placed')}</span><strong>${money(o.total || 0)}</strong></span></li>`).join('')}</ul>`
         : '<p class="d-empty">No orders in this period.</p>'}
     </div>
@@ -2023,18 +3590,32 @@ function openOrderDrawer(number) {
       <div class="od-row"><span><strong>${escapeHtml(o.name || '-')}</strong></span></div>
       <div class="od-row"><span>Phone</span><span>${escapeHtml(o.phone || '-')}</span></div>
       ${o.email ? `<div class="od-row"><span>Email</span><span>${escapeHtml(o.email)}</span></div>` : ''}
-      <div class="od-row"><span>Address</span><span style="text-align:right;max-width:60%;">${escapeHtml(o.address || '-')}${o.city ? ', ' + escapeHtml(o.city) : ''}</span></div>
+      <div class="od-row"><span>Address</span><span style="text-align:right;max-width:60%;">${escapeHtml(o.address || '-')}${o.city ? ', ' + escapeHtml(o.city) : ''} <button class="d-mini" data-copy-addr="${escapeHtml([o.name, o.address, o.city, o.phone].filter(Boolean).join(', '))}" title="Copy full address" style="margin-left:6px;"><i class="fas fa-copy"></i></button></span></div>
       ${o.notes ? `<div class="od-row"><span>Notes</span><span style="text-align:right;max-width:60%;">${escapeHtml(o.notes)}</span></div>` : ''}
       <div class="od-actions">
         ${wa ? `<a class="d-mini wa" href="${wa}" target="_blank" rel="noopener"><i class="fab fa-whatsapp"></i> WhatsApp</a>` : ''}
         ${o.phone ? `<a class="d-mini" href="tel:${escapeHtml(String(o.phone).replace(/\D/g, ''))}"><i class="fas fa-phone"></i> Call</a>` : ''}
         <button class="d-mini" data-print-invoice="${escapeHtml(o.number)}"><i class="fas fa-print"></i> Invoice</button>
+        <button class="d-mini" data-print-label="${escapeHtml(o.number)}" title="Print shipping label"><i class="fas fa-truck"></i> Label</button>
       </div>
     </div>
+    ${wa ? `<div class="od-sec">
+      <h5>Quick WhatsApp</h5>
+      <div class="od-actions">
+        <a class="d-mini wa" href="${waTemplateLink(o, 'shipped')}" target="_blank" rel="noopener"><i class="fab fa-whatsapp"></i> Shipped</a>
+        <a class="d-mini wa" href="${waTemplateLink(o, 'ontheway')}" target="_blank" rel="noopener"><i class="fab fa-whatsapp"></i> On the way</a>
+        <a class="d-mini wa" href="${waTemplateLink(o, 'delivered')}" target="_blank" rel="noopener"><i class="fab fa-whatsapp"></i> Delivered</a>
+      </div>
+    </div>` : ''}
     <div class="od-sec">
       <h5>Items</h5>
-      ${(o.items || []).map(it => `<div class="od-row"><span>${escapeHtml(it.name)} <em>× ${it.qty || 1}</em></span><span>${money(it.price * (it.qty || 1))}</span></div>`).join('')}
+      ${(o.items || []).map(it => `<div class="od-row"><span>${itemThumbHTML(it)}${escapeHtml(it.name)} <em>× ${it.qty || 1}</em></span><span>${money(it.price * (it.qty || 1))}</span></div>`).join('')}
     </div>
+    ${(() => {
+      const others = (adminOrdersCache || []).filter(x => x.number !== o.number && String(x.phone || '').trim() && String(x.phone || '').trim() === String(o.phone || '').trim()).slice(0, 5);
+      return others.length ? `<div class="od-sec"><h5>Other orders by this customer (${others.length})</h5>
+        ${others.map(x => `<div class="od-row"><span><button class="link-btn od-open" data-view-order="${escapeHtml(x.number)}">${escapeHtml(x.number)}</button> · ${escapeHtml(x.date || '')}</span><span><span class="a-status ${x.status} sm">${capitalize(x.status || '')}</span> <strong>${money(x.total || 0)}</strong></span></div>`).join('')}</div>` : '';
+    })()}
     <div class="od-sec">
       <h5>Totals</h5>
       <div class="od-row"><span>Subtotal</span><span>${money(o.subtotal || 0)}</span></div>
@@ -2068,31 +3649,50 @@ function orderCountByPhone(phone) {
 function ordersTabHTML() {
   const f = adminOrderFilter;
   const q = adminOrderSearch.trim().toLowerCase();
+  const cities = [...new Set((adminOrdersCache || []).map(o => o.city).filter(Boolean))].sort();
   const list = adminOrdersCache.filter(o => {
     if (f !== 'all' && o.status !== f) return false;
+    if (adminOrderCity !== 'all' && o.city !== adminOrderCity) return false;
     if (q && !`${o.number} ${o.name} ${o.phone}`.toLowerCase().includes(q)) return false;
     return true;
   });
-  const opts = ['placed', 'confirmed', 'shipped', 'delivered'];
+  const opts = ['placed', 'confirmed', 'shipped', 'delivered', 'returned'];
   return `
   <div class="a-toolbar">
     <input id="admin-order-search" type="search" placeholder="Search name, order #, phone…" value="${escapeHtml(adminOrderSearch)}" aria-label="Search orders" style="min-width:220px;" />
     <select id="admin-order-filter" aria-label="Filter orders">
       ${['all', ...opts].map(s => `<option value="${s}"${s === f ? ' selected' : ''}>${s === 'all' ? 'All orders' : capitalize(s)}</option>`).join('')}
     </select>
+    <select id="admin-order-city" aria-label="Filter by city">
+      <option value="all">All cities</option>
+      ${cities.map(c => `<option value="${escapeHtml(c)}"${c === adminOrderCity ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+    </select>
     <button class="d-mini" data-export-orders>Export CSV</button>
   </div>
+  ${list.length ? `
+  <div class="a-toolbar bulk-bar">
+    <label class="a-bulk-check"><input type="checkbox" id="bulk-all" /> Select all</label>
+    <select id="bulk-status" aria-label="Bulk status">${opts.map(s => `<option value="${s}">${capitalize(s)}</option>`).join('')}</select>
+    <button class="d-mini" id="bulk-apply">Apply to selected</button>
+    <button class="d-mini" id="bulk-print" title="Print invoices for selected"><i class="fas fa-print"></i> Invoices</button>
+    <button class="d-mini" id="pick-list" title="Print pick list for unshipped orders"><i class="fas fa-box"></i> Pick list</button>
+    <button class="d-mini" id="admin-density-toggle" title="Toggle compact density"><i class="fas fa-compress"></i></button>
+  </div>` : ''}
   ${!list.length ? '<p class="d-empty">No orders found.</p>' : list.map(o => {
     const itemCount = (o.items || []).reduce((s, it) => s + (it.qty || 1), 0);
     const repeats = orderCountByPhone(o.phone);
     const wa = waLink(o);
     return `
-    <div class="a-order">
+    <div class="a-order st-${o.status || 'placed'}">
       <div class="a-order-head">
-        <div>
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <input type="checkbox" class="bulk-check" data-num="${escapeHtml(o.number)}" aria-label="Select order ${escapeHtml(o.number)}" style="margin-top:6px;" />
+          <div>
           <button class="link-btn od-open" data-view-order="${escapeHtml(o.number)}" style="font-size:17px;font-weight:700;" title="View details">${escapeHtml(o.number)}</button>
           ${repeats > 1 ? `<span class="a-badge-repeat" title="${repeats} orders from this customer"><i class="fas fa-star"></i> Repeat ×${repeats}</span>` : ''}
           <span class="a-order-meta">${escapeHtml(o.date || '')} · ${itemCount} item${itemCount === 1 ? '' : 's'} · COD</span>
+          ${orderDotsHTML(o.status)}
+          </div>
         </div>
         <div class="a-order-right">
           <span class="a-status ${o.status}">${capitalize(o.status || 'placed')}</span>
@@ -2101,6 +3701,8 @@ function ordersTabHTML() {
           </select>
           ${wa ? `<a class="d-mini wa" href="${wa}" target="_blank" rel="noopener" title="Message on WhatsApp"><i class="fab fa-whatsapp"></i></a>` : ''}
           <button class="d-mini" data-print-invoice="${escapeHtml(o.number)}" title="Print invoice"><i class="fas fa-print"></i></button>
+          <button class="d-mini" data-print-slip="${escapeHtml(o.number)}" title="Print packing slip"><i class="fas fa-box"></i></button>
+          <button class="d-mini" data-print-label="${escapeHtml(o.number)}" title="Print shipping label"><i class="fas fa-truck"></i></button>
           <button class="d-mini danger" data-del-order="${escapeHtml(o.number)}">Delete</button>
         </div>
       </div>
@@ -2109,9 +3711,12 @@ function ordersTabHTML() {
         <span class="a-order-meta">${escapeHtml([o.phone, o.email].filter(Boolean).join(' · ') || '')}</span>
         ${o.address ? `<span class="a-order-meta">${escapeHtml(o.address)}${o.city ? ', ' + escapeHtml(o.city) : ''}</span>` : ''}
       </div>
+      <button class="ord-items-toggle" data-ord-items="${escapeHtml(o.number)}"><i class="fas fa-chevron-down"></i> ${itemCount} item${itemCount === 1 ? '' : 's'} — ${money((o.items || []).reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0))}</button>
+      <div class="ord-items-body" id="oi-${escapeHtml(o.number)}">
       <ul class="o-lines">
-        ${(o.items || []).map(it => `<li><span>${escapeHtml(it.name)} <em>× ${it.qty || 1}</em></span><span>${money(it.price * (it.qty || 1))}</span></li>`).join('')}
+        ${(o.items || []).map(it => `<li><span>${itemThumbHTML(it)}${escapeHtml(it.name)} <em>× ${it.qty || 1}</em></span><span>${money(it.price * (it.qty || 1))}</span></li>`).join('')}
       </ul>
+      </div>
       <div class="a-order-foot">
         ${o.promo ? `<span>Promo ${escapeHtml(o.promo)} (−${money(o.discount || 0)})</span>` : '<span></span>'}
         <strong>${money(o.total || 0)}</strong>
@@ -2120,10 +3725,24 @@ function ordersTabHTML() {
 }
 
 function productsTabHTML() {
+  const cats = [...new Set(PRODUCTS.map(p => p.category).filter(Boolean))].sort();
+  const q = adminProductSearch.trim().toLowerCase();
+  const lowTh = Number(SETTINGS.low_stock_threshold != null && SETTINGS.low_stock_threshold !== '' ? SETTINGS.low_stock_threshold : 5);
+  const list = PRODUCTS.filter(p => {
+    if (adminProductCat !== 'all' && p.category !== adminProductCat) return false;
+    if (q && !(p.name || '').toLowerCase().includes(q)) return false;
+    return true;
+  });
   return `
   <div class="a-toolbar">
     <button class="btn-solid" data-add-product style="padding:13px 30px;">+ Add Product</button>
-    <span class="a-order-meta">${PRODUCTS.length} product(s) live on the store</span>
+    <input id="admin-product-search" type="search" placeholder="Search products…" value="${escapeHtml(adminProductSearch)}" aria-label="Search products" style="min-width:200px;" />
+    <select id="admin-product-cat" aria-label="Filter by category">
+      <option value="all">All categories</option>
+      ${cats.map(c => `<option value="${escapeHtml(c)}"${c === adminProductCat ? ' selected' : ''}>${capitalize(c)}</option>`).join('')}
+    </select>
+    <span class="a-order-meta">${list.length} of ${PRODUCTS.length} product(s)</span>
+    <span class="a-order-meta" title="Total value of current stock">· Stock worth <strong>${money(PRODUCTS.reduce((s, p) => s + (p.price || 0) * (p.stock || 0), 0))}</strong></span>
   </div>
   <div class="a-toolbar" style="margin-top:10px;">
     <span class="a-order-meta">Bulk price update:</span>
@@ -2134,13 +3753,14 @@ function productsTabHTML() {
     <input id="bulk-pct" type="number" min="1" max="90" placeholder="%" style="width:76px;" aria-label="Percent" />
     <button class="d-mini" data-bulk-price>Apply to all</button>
   </div>
-  <div class="a-products">` + PRODUCTS.map(p => `
-    <div class="a-product${p.visible === false ? ' dim' : ''}">
+  <div class="a-products">` + list.map(p => `
+    <div class="a-product${p.visible === false ? ' dim' : ''}${(p.stock || 0) <= lowTh ? ' lowstock' : ''}" data-drag-id="${p.id}">
+      <span class="drag-handle" data-drag-handle draggable="true" title="Drag to reorder"><i class="fas fa-grip-vertical"></i></span>
       <img src="${p.image}" alt="" loading="lazy" decoding="async" />
       <div class="a-product-info"><strong>${escapeHtml(p.name)}</strong><span>${capitalize(p.category)} · ${money(p.price)}</span></div>
       <div class="a-stock-ctl" title="Stock">
         <button class="d-mini" data-stock-dec="${p.id}" aria-label="Decrease stock">−</button>
-        <span class="a-stock-num">${p.stock || 0}</span>
+        <span class="a-stock-num${(p.stock || 0) <= lowTh ? ' low' : ''}">${p.stock || 0}</span>
         <button class="d-mini" data-stock-inc="${p.id}" aria-label="Increase stock">+</button>
       </div>
       <label class="a-vis" title="Show / hide on store">
@@ -2148,6 +3768,7 @@ function productsTabHTML() {
         <span>Visible</span>
       </label>
       <button class="d-mini" data-edit-product="${p.id}">Edit</button>
+      <button class="d-mini" data-dup-product="${p.id}" title="Duplicate product"><i class="fas fa-copy"></i></button>
       <button class="d-mini danger" data-del-product="${p.id}">Delete</button>
     </div>`).join('') + `</div>` + productModalHTML();
 }
@@ -2212,35 +3833,50 @@ function closeProductModal() {
 }
 
 // ---------- Customers ----------
+let adminCustomerSearch = '';
 function customersTabHTML() {
   const map = {};
   (adminOrdersCache || []).forEach(o => {
     const key = String(o.phone || '').replace(/\D/g, '') || String(o.email || '').toLowerCase();
     if (!key) return;
-    if (!map[key]) map[key] = { name: o.name || '-', phone: o.phone || '-', email: o.email || '-', orders: 0, spent: 0, last: null, lastStr: '' };
+    if (!map[key]) map[key] = { key, name: o.name || '-', phone: o.phone || '-', email: o.email || '-', orders: 0, spent: 0, last: null, lastStr: '', list: [] };
     const c = map[key];
     c.orders++;
     c.spent += Number(o.total || 0);
+    c.list.push(o);
     if (o.name && c.name === '-') c.name = o.name;
     const d = parseOrderDate(o.date);
     if (d && (!c.last || d > c.last)) { c.last = d; c.lastStr = o.date; }
   });
-  const list = Object.values(map).sort((a, b) => b.spent - a.spent);
+  const q = adminCustomerSearch.trim().toLowerCase();
+  const list = Object.values(map)
+    .filter(c => !q || `${c.name} ${c.phone} ${c.email}`.toLowerCase().includes(q))
+    .sort((a, b) => b.spent - a.spent);
   return `
-  <div class="a-toolbar"><span class="a-order-meta">${list.length} customer(s) · sorted by total spent</span>
-  <button class="d-mini" data-export-customers>Export CSV</button></div>
+  <div class="a-toolbar">
+    <input id="admin-customer-search" type="search" placeholder="Search customers…" value="${escapeHtml(adminCustomerSearch)}" aria-label="Search customers" style="min-width:220px;" />
+    <span class="a-order-meta">${list.length} customer(s) · sorted by total spent</span>
+    <button class="d-mini" data-export-customers>Export CSV</button>
+  </div>
   ${!list.length ? '<p class="d-empty">No customers yet.</p>' : `
   <div class="a-table-wrap"><table class="a-table">
     <tr><th>Customer</th><th>Phone</th><th>Orders</th><th>Total Spent</th><th>Last Order</th><th></th></tr>
-    ${list.map(c => `
-    <tr>
-      <td><strong>${escapeHtml(c.name)}</strong><br><span class="a-order-meta">${escapeHtml(c.email)}</span></td>
-      <td>${escapeHtml(c.phone)}</td>
+    ${list.map((c, i) => `
+    <tr class="cust-row" data-cust="${escapeHtml(c.key)}" title="Click to see orders">
+      <td>${i === 0 && c.spent > 0 ? '<span title="Top spender" style="color:#c6a15b;margin-right:6px;"><i class="fas fa-crown"></i></span>' : ''}<strong>${escapeHtml(c.name)}</strong><br><span class="a-order-meta">${escapeHtml(c.email)}</span></td>
+      <td>${escapeHtml(c.phone)}${c.phone && c.phone !== '-' ? ` <a class="d-mini wa" href="https://wa.me/${String(c.phone).replace(/\D/g, '').replace(/^0/, '92')}" target="_blank" rel="noopener" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></a>` : ''}</td>
       <td>${c.orders}</td>
       <td><strong>${money(c.spent)}</strong></td>
-      <td>${escapeHtml(c.lastStr)}</td>
-      <td>${c.orders > 1 ? '<span class="a-badge-repeat"><i class="fas fa-star"></i> Loyal</span>' : ''}</td>
-    </tr>`).join('')}
+      <td>${escapeHtml(c.lastStr)}<br><span class="rel-time">${c.last ? timeAgo(c.last.toISOString()) : ''}</span></td>
+      <td>${c.orders > 1 ? '<span class="a-badge-repeat"><i class="fas fa-star"></i> Loyal</span>' : ''}${c.last && (Date.now() - c.last.getTime() > 60 * 864e5) ? ' <span class="a-badge-risk" title="No order in 60+ days"><i class="fas fa-heart-crack"></i> At risk</span>' : ''} <i class="fas fa-chevron-down" style="font-size:10px;color:#b3ac9c;margin-left:6px;"></i></td>
+    </tr>
+    <tr class="cust-orders" id="cust-${escapeHtml(c.key)}" style="display:none;"><td colspan="6">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span class="a-order-meta">${c.orders} order${c.orders === 1 ? '' : 's'} · ${money(c.spent)} lifetime</span>
+        <button class="d-mini" data-cust-stmt="${escapeHtml(c.key)}"><i class="fas fa-print"></i> Statement</button>
+      </div>
+      ${c.list.map(o => `<div class="cust-ord-line"><span><button class="link-btn od-open" data-view-order="${escapeHtml(o.number)}">${escapeHtml(o.number)}</button> · ${escapeHtml(o.date || '')}</span><span class="a-status ${o.status} sm">${capitalize(o.status || '')}</span><strong>${money(o.total || 0)}</strong></div>`).join('')}
+    </td></tr>`).join('')}
   </table></div>`}`;
 }
 
@@ -2276,10 +3912,29 @@ function settingsTabHTML() {
       <textarea id="set-delivery-cities" rows="5" placeholder="Lahore: 200&#10;Karachi: 300">${escapeHtml(cityLines)}</textarea>
     </div>
     <p class="a-order-meta">Checkout shows a city dropdown; other cities use the default fee.</p>
+    <div class="pf-grid">
+      <div class="field"><label>Free delivery above (Rs.) <span class="opt">0 = off</span></label>
+        <input id="set-free-ship" type="number" min="0" step="100" value="${escapeHtml(SETTINGS.free_shipping_threshold || '0')}" />
+      </div>
+      <div class="field"><label>Low-stock alert at (units)</label>
+        <input id="set-low-stock" type="number" min="1" step="1" value="${escapeHtml(SETTINGS.low_stock_threshold != null && SETTINGS.low_stock_threshold !== '' ? SETTINGS.low_stock_threshold : '5')}" />
+      </div>
+      <div class="field"><label>Low-stock email template ID <span class="opt">EmailJS</span></label>
+        <input id="set-lowstock-tpl" type="text" placeholder="template_xxxxxxx" value="${escapeHtml(SETTINGS.lowstock_email_template || '')}" />
+      </div>
+    </div>
+    <p class="a-order-meta">Free delivery: shoppers see a progress bar and pay Rs. 0 delivery above the threshold. Low-stock: you get an email when a product falls to this level.</p>
     <div class="field" style="max-width:320px;"><label>Monthly sales goal (Rs.)</label>
       <input id="set-sales-goal" type="number" min="0" step="1000" value="${escapeHtml(SETTINGS.sales_goal || '50000')}" />
     </div>
-    <button class="btn-solid" data-save-settings style="padding:13px 34px;">Save Settings</button>
+    <div class="ov-panel" style="margin-bottom:22px;">
+      <h4>Login history</h4>
+      <p class="a-order-meta" style="margin-bottom:12px;">Who signed in to this dashboard, latest first.</p>
+      <div id="login-history"><p class="a-order-meta">Loading…</p></div>
+    </div>
+    <div class="sticky-save"><button class="btn-solid" data-save-settings style="padding:13px 34px;">Save Settings</button>
+    <button type="button" class="d-mini" id="backup-btn" style="margin-left:12px;"><i class="fas fa-download"></i> Full backup (JSON)</button>
+    <button type="button" class="d-mini" id="tour-replay" style="margin-left:8px;"><i class="fas fa-route"></i> Take the tour</button></div>
   </div>`;
 }
 
@@ -2298,8 +3953,8 @@ function promosTabHTML() {
     const rev = uses.reduce((s, o) => s + Number(o.total || 0), 0);
     return `
     <li class="${pr.active ? '' : 'off'}">
-      <strong>${escapeHtml(pr.code)}</strong><span>${Math.round(pr.percent * 100)}% off</span>
-      <span class="a-promo-stat"><i class="fas fa-cart-shopping"></i> ${uses.length} used · ${money(rev)}</span>
+      <strong class="promo-code-copy" data-copy-code="${escapeHtml(pr.code)}" title="Click to copy">${escapeHtml(pr.code)} <i class="fas fa-copy"></i></strong><span>${Math.round(pr.percent * 100)}% off</span>
+      <span class="a-promo-stat"><i class="fas fa-cart-shopping"></i> ${uses.length} used · ${money(rev)}<span class="promo-usebar"><span style="width:${Math.min(100, uses.length * 10)}%"></span></span></span>
       <span class="a-status ${pr.active ? 'delivered' : 'placed'}">${pr.active ? 'Active' : 'Off'}</span>
       <button class="d-mini" data-promo-toggle="${escapeHtml(pr.code)}">${pr.active ? 'Disable' : 'Enable'}</button>
       <button class="d-mini danger" data-promo-del="${escapeHtml(pr.code)}">Delete</button>
@@ -2317,25 +3972,35 @@ function toLocalInput(iso) {
 function contentTabHTML() {
   const s = SETTINGS;
   return `
+  <div class="cs-preview" id="cs-preview" aria-label="Live preview">
+    <div class="pv-ann"></div>
+    <div class="pv-hero"><div class="pv-eyebrow eyebrow"></div><h2 class="pv-h"></h2></div>
+  </div>
   <form id="content-form" class="a-content" novalidate>
-    <div class="field"><label>Announcement bar message</label><input id="cs-announcement" value="${escapeHtml(s.announcement || '')}" /></div>
-    <div class="pf-grid">
-      <div class="field"><label>Hero eyebrow</label><input id="cs-eyebrow" value="${escapeHtml(s.hero_eyebrow || '')}" /></div>
-      <div class="field"><label>Hero line 1</label><input id="cs-l1" value="${escapeHtml(s.hero_line1 || '')}" /></div>
-      <div class="field"><label>Hero line 2 (italic gold)</label><input id="cs-l2" value="${escapeHtml(s.hero_line2 || '')}" /></div>
-      <div class="field"><label>Hero line 3</label><input id="cs-l3" value="${escapeHtml(s.hero_line3 || '')}" /></div>
+    <div class="cs-sec"><h5>Announcement bar</h5>
+      <div class="field"><label>Announcement bar message</label><input id="cs-announcement" value="${escapeHtml(s.announcement || '')}" /></div>
     </div>
-    <div class="pf-grid">
-      <div class="field"><label>Sale section</label>
-        <select id="cs-sale">
-          <option value="1"${s.sale_enabled === '1' ? ' selected' : ''}>Visible</option>
-          <option value="0"${s.sale_enabled !== '1' ? ' selected' : ''}>Hidden</option>
-        </select>
+    <div class="cs-sec"><h5>Hero</h5>
+      <div class="pf-grid">
+        <div class="field"><label>Hero eyebrow</label><input id="cs-eyebrow" value="${escapeHtml(s.hero_eyebrow || '')}" /></div>
+        <div class="field"><label>Hero line 1</label><input id="cs-l1" value="${escapeHtml(s.hero_line1 || '')}" /></div>
+        <div class="field"><label>Hero line 2 (italic gold)</label><input id="cs-l2" value="${escapeHtml(s.hero_line2 || '')}" /></div>
+        <div class="field"><label>Hero line 3</label><input id="cs-l3" value="${escapeHtml(s.hero_line3 || '')}" /></div>
       </div>
-      <div class="field"><label>Sale ends at</label><input id="cs-saleend" type="datetime-local" value="${toLocalInput(s.sale_ends_at)}" /></div>
     </div>
-    <p class="admin-hint" style="text-align:left;margin:0 0 24px;">Hero text updates the next time the home page renders. Sale end uses your local time.</p>
-    <button type="submit" class="btn-solid" style="padding:14px 40px;">Save Content</button>
+    <div class="cs-sec"><h5>Sale section</h5>
+      <div class="pf-grid">
+        <div class="field"><label>Sale section</label>
+          <select id="cs-sale">
+            <option value="1"${s.sale_enabled === '1' ? ' selected' : ''}>Visible</option>
+            <option value="0"${s.sale_enabled !== '1' ? ' selected' : ''}>Hidden</option>
+          </select>
+        </div>
+        <div class="field"><label>Sale ends at</label><input id="cs-saleend" type="datetime-local" value="${toLocalInput(s.sale_ends_at)}" /></div>
+      </div>
+      <p class="admin-hint" style="text-align:left;margin:6px 0 0;">Hero text updates the next time the home page renders. Sale end uses your local time.</p>
+    </div>
+    <div class="sticky-save"><button type="submit" class="btn-solid" style="padding:14px 40px;">Save Content</button></div>
   </form>`;
 }
 
@@ -2345,7 +4010,7 @@ function messagesTabHTML() {
     const d = m.created_at ? new Date(m.created_at).toLocaleDateString('en-PK', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
     return `<div class="a-msg">
       <div class="a-msg-head">
-        <div><strong>${escapeHtml(m.name || '-')}</strong><span class="a-order-meta">${escapeHtml(m.email || '')}${d ? ' · ' + d : ''}</span></div>
+        <div><strong>${escapeHtml(m.name || '-')}</strong><span class="a-order-meta">${escapeHtml(m.email || '')}${d ? ' · ' + d : ''} ${m.created_at ? '· <span class="rel-time">' + timeAgo(m.created_at) + '</span>' : ''}</span></div>
         <div style="display:flex;gap:8px;">
           ${m.email ? `<a class="d-mini" href="mailto:${escapeHtml(m.email)}?subject=${encodeURIComponent('Re: Your message to Luxe Boutique')}"><i class="fas fa-reply"></i> Reply</a>` : ''}
           <button class="d-mini danger" data-del-msg="${escapeHtml(String(m.id))}">Delete</button>
@@ -2358,7 +4023,17 @@ function messagesTabHTML() {
 
 function newsletterTabHTML() {
   if (!adminNlCache.length) return '<p class="d-empty">No subscribers yet.</p>';
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  const counts = days.map(d => adminNlCache.filter(e => (e.created_at || '').slice(0, 10) === d).length);
+  const totalNew = counts.reduce((a, b) => a + b, 0);
   return `<div class="a-toolbar"><div class="a-nl-count">${adminNlCache.length} subscriber(s)</div>
+    <span class="a-order-meta">Signups, last 14 days:</span>${sparkSVG(counts, 180, 30, '#9a7b3f')}
+    <span class="a-order-meta">+${totalNew} in 14d</span>
+    <button class="d-mini" data-copy-newsletter><i class="fas fa-copy"></i> Copy all emails</button>
     <button class="d-mini" data-export-newsletter>Export CSV</button></div>
     <ul class="a-nl-list">` + adminNlCache.map(e => {
       const d = e.created_at ? new Date(e.created_at).toLocaleDateString('en-PK', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
@@ -2472,9 +4147,10 @@ document.body.addEventListener('click', (e) => {
     const id = Number((inc ? e.target.closest('[data-stock-inc]') : e.target.closest('[data-stock-dec]')).getAttribute(inc ? 'data-stock-inc' : 'data-stock-dec'));
     const p = PRODUCTS.find(x => x.id === id);
     if (p) {
-      const nv = Math.max(0, (p.stock || 0) + (inc ? 1 : -1));
+      const prev = p.stock || 0;
+      const nv = Math.max(0, prev + (inc ? 1 : -1));
       DB.updateProduct(id, { stock: nv }, adminToken)
-        .then(() => { p.stock = nv; renderAdminTab(); showToast(`${p.name}: stock ${nv}`); })
+        .then(() => { p.stock = nv; checkLowStock(p, prev); renderAdminTab(); showToast(`${p.name}: stock ${nv}`); })
         .catch(() => showToast('Stock update failed'));
     }
     return;
@@ -2484,13 +4160,15 @@ document.body.addEventListener('click', (e) => {
     const dir = document.getElementById('bulk-dir').value;
     if (!pct || pct <= 0 || pct > 90) { showToast('Enter a percent between 1 and 90'); return; }
     const factor = dir === 'up' ? 1 + pct / 100 : 1 - pct / 100;
-    if (!confirm(`${dir === 'up' ? 'Increase' : 'Decrease'} ALL product prices by ${pct}%?`)) return;
-    showToast('Updating prices…');
-    Promise.all(PRODUCTS.map(p => {
-      const nv = Math.max(1, Math.round(p.price * factor * 100) / 100);
-      return DB.updateProduct(p.id, { price: nv }, adminToken).then(() => { p.price = nv; });
-    })).then(() => { renderAdminTab(); showToast('All prices updated'); })
+    confirmModal('Bulk price update', `${dir === 'up' ? 'Increase' : 'Decrease'} ALL product prices by ${pct}%?`, 'Apply', false).then(ok => {
+      if (!ok) return;
+      showToast('Updating prices…');
+      Promise.all(PRODUCTS.map(p => {
+        const nv = Math.max(1, Math.round(p.price * factor * 100) / 100);
+        return DB.updateProduct(p.id, { price: nv }, adminToken).then(() => { p.price = nv; });
+      })).then(() => { renderAdminTab(); showToast('All prices updated'); })
       .catch(() => { renderAdminTab(); showToast('Some updates failed'); });
+    });
     return;
   }
   const editP = e.target.closest('[data-edit-product]');
@@ -2503,11 +4181,18 @@ document.body.addEventListener('click', (e) => {
   if (delP) {
     const id = delP.getAttribute('data-del-product');
     const p = PRODUCTS.find(x => x.id === Number(id));
-    if (!confirm(`Delete "${p ? p.name : id}" permanently?`)) return;
-    DB.deleteProduct(id, adminToken)
-      .then(() => DB.getProducts())
-      .then(ps => { PRODUCTS = ps; showToast('Product deleted'); loadAdminData(); })
-      .catch(() => showToast('Delete failed'));
+    confirmModal('Delete product', `"${p ? p.name : id}" will be permanently removed.`, 'Delete', true).then(ok => {
+      if (!ok) return;
+      const backup = p ? { ...p } : null;
+      DB.deleteProduct(id, adminToken)
+        .then(() => DB.getProducts())
+        .then(ps => {
+          PRODUCTS = ps; applyProductOrder(); loadAdminData();
+          if (backup) showUndoToast('Product deleted', () => DB.createProduct({ ...backup }, adminToken).then(() => DB.getProducts()).then(ps2 => { PRODUCTS = ps2; applyProductOrder(); loadAdminData(); }).catch(() => showToast('Undo failed')));
+          else showToast('Product deleted');
+        })
+        .catch(() => showToast('Delete failed'));
+    });
     return;
   }
   if (e.target.closest('#pm-cancel') || e.target.id === 'product-modal') { closeProductModal(); return; }
@@ -2527,11 +4212,18 @@ document.body.addEventListener('click', (e) => {
   const promoDel = e.target.closest('[data-promo-del]');
   if (promoDel) {
     const code = promoDel.getAttribute('data-promo-del');
-    if (!confirm(`Delete promo "${code}"?`)) return;
-    DB.deletePromo(code, adminToken)
-      .then(() => DB.getPromos().catch(() => PROMOS))
-      .then(m => { PROMOS = m; if (promoCode === code) { removePromo(); refreshCheckoutTotals(); } updateCart(); showToast('Promo deleted'); loadAdminData(); })
-      .catch(() => showToast('Delete failed'));
+    confirmModal('Delete promo', `Code "${code}" will be permanently removed.`, 'Delete', true).then(ok => {
+      if (!ok) return;
+      const backup = (adminPromoCache || []).find(x => x.code === code);
+      DB.deletePromo(code, adminToken)
+        .then(() => DB.getPromos().catch(() => PROMOS))
+        .then(m => {
+          PROMOS = m; if (promoCode === code) { removePromo(); refreshCheckoutTotals(); } updateCart(); loadAdminData();
+          if (backup) showUndoToast('Promo deleted', () => DB.savePromo(backup.code, backup.percent, backup.active, adminToken).then(() => loadAdminData()).catch(() => showToast('Undo failed')));
+          else showToast('Promo deleted');
+        })
+        .catch(() => showToast('Delete failed'));
+    });
     return;
   }
 
@@ -2539,19 +4231,33 @@ document.body.addEventListener('click', (e) => {
   const delO = e.target.closest('[data-del-order]');
   if (delO) {
     const num = delO.getAttribute('data-del-order');
-    if (!confirm(`Delete order ${num} permanently?`)) return;
-    DB.deleteOrder(num, adminToken)
-      .then(() => { showToast('Order deleted'); loadAdminData(); })
-      .catch(() => showToast('Delete failed'));
+    confirmModal('Delete order', `Order ${num} will be permanently removed.`, 'Delete', true).then(ok => {
+      if (!ok) return;
+      const backup = (adminOrdersCache || []).find(x => x.number === num);
+      DB.deleteOrder(num, adminToken)
+        .then(() => {
+          loadAdminData();
+          if (backup) showUndoToast('Order deleted', () => DB.createOrder({ ...backup }).then(() => loadAdminData()).catch(() => showToast('Undo failed')));
+          else showToast('Order deleted');
+        })
+        .catch(() => showToast('Delete failed'));
+    });
     return;
   }
   const delM = e.target.closest('[data-del-msg]');
   if (delM) {
     const id = delM.getAttribute('data-del-msg');
-    if (!confirm('Delete this message permanently?')) return;
-    DB.deleteMessage(id, adminToken)
-      .then(() => { showToast('Message deleted'); loadAdminData(); })
-      .catch(() => showToast('Delete failed'));
+    confirmModal('Delete message', 'This message will be permanently removed.', 'Delete', true).then(ok => {
+      if (!ok) return;
+      const backup = (adminMsgCache || []).find(x => String(x.id) === String(id));
+      DB.deleteMessage(id, adminToken)
+        .then(() => {
+          loadAdminData();
+          if (backup) showUndoToast('Message deleted', () => DB.createMessage({ name: backup.name, email: backup.email, message: backup.message }).then(() => loadAdminData()).catch(() => showToast('Undo failed')));
+          else showToast('Message deleted');
+        })
+        .catch(() => showToast('Delete failed'));
+    });
     return;
   }
   if (e.target.closest('[data-export-orders]')) {
@@ -2598,7 +4304,10 @@ document.body.addEventListener('click', (e) => {
       DB.saveSetting('sales_goal', String(parseFloat(document.getElementById('set-sales-goal').value) || 0), adminToken),
       DB.saveSetting('store_phone', document.getElementById('set-store-phone').value.trim(), adminToken),
       DB.saveSetting('store_email', document.getElementById('set-store-email').value.trim(), adminToken),
-      DB.saveSetting('store_address', document.getElementById('set-store-address').value.trim(), adminToken)
+      DB.saveSetting('store_address', document.getElementById('set-store-address').value.trim(), adminToken),
+      DB.saveSetting('free_shipping_threshold', String(parseFloat(document.getElementById('set-free-ship').value) || 0), adminToken),
+      DB.saveSetting('low_stock_threshold', String(parseInt(document.getElementById('set-low-stock').value, 10) || 5), adminToken),
+      DB.saveSetting('lowstock_email_template', document.getElementById('set-lowstock-tpl').value.trim(), adminToken)
     ]).then(() => DB.getSettings().catch(() => null))
       .then(s => { if (s) SETTINGS = { ...SETTINGS, ...s }; applySettings(); renderAdminTab(); showToast('Settings saved'); })
       .catch(() => showToast('Save failed'));
@@ -2757,6 +4466,28 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'admin-global-search') {
     renderAdminSearch(e.target.value);
   }
+  if (e.target.id === 'admin-product-search') {
+    adminProductSearch = e.target.value;
+    const pos = e.target.selectionStart;
+    renderAdminTab();
+    const inp = document.getElementById('admin-product-search');
+    if (inp) { inp.focus(); try { inp.setSelectionRange(pos, pos); } catch (err) {} }
+  }
+  if (e.target.id === 'admin-product-cat') {
+    adminProductCat = e.target.value;
+    renderAdminTab();
+  }
+  if (e.target.id === 'admin-customer-search') {
+    adminCustomerSearch = e.target.value;
+    const pos = e.target.selectionStart;
+    renderAdminTab();
+    const inp = document.getElementById('admin-customer-search');
+    if (inp) { inp.focus(); try { inp.setSelectionRange(pos, pos); } catch (err) {} }
+  }
+  if (e.target.closest('#content-form')) updateContentPreview();
+});
+document.addEventListener('change', e => {
+  if (e.target.id === 'admin-order-city') { adminOrderCity = e.target.value; renderAdminTab(); }
 });
 
 // Forms
@@ -2807,6 +4538,7 @@ document.body.addEventListener('submit', (e) => {
       status: 'placed', payment: 'COD'
     };
     DB.createOrder(order).then(() => {
+      disarmAbandonedCapture();
       cartContents = []; saveCart(); updateCart(); closeDrawers();
       renderOrderSuccess(order);
     }).catch(() => showToast('Order failed: check connection and try again'));
@@ -2848,10 +4580,14 @@ document.body.addEventListener('submit', (e) => {
     btn.disabled = true;
     btn.textContent = 'Saving…';
     const done = () => DB.getProducts().then(ps => {
-      PRODUCTS = ps; closeProductModal(); showToast('Product saved'); loadAdminData();
+      PRODUCTS = ps; applyProductOrder(); closeProductModal(); showToast('Product saved'); loadAdminData();
     });
     const fail = (err) => { btn.disabled = false; btn.textContent = 'Save Product'; showToast((err && err.message) || 'Save failed'); };
-    if (id) DB.updateProduct(id, data, adminToken).then(done).catch(fail);
+    if (id) DB.updateProduct(id, data, adminToken).then(() => {
+      const upd = PRODUCTS.find(x => x.id === Number(id));
+      if (upd) checkLowStock({ ...upd, stock: data.stock }, existing ? (existing.stock || 0) : 0);
+      done();
+    }).catch(fail);
     else DB.createProduct(data, adminToken).then(done).catch(fail);
   }
   if (e.target.id === 'promo-form') {
@@ -2905,7 +4641,7 @@ document.body.addEventListener('submit', (e) => {
       const email = document.getElementById('admin-email').value.trim();
       const pw = document.getElementById('admin-pass').value;
       if (!validEmail(email) || !pw) { fail('Enter your admin email and password'); return; }
-      DB.adminLogin(email, pw).then(done).catch(err => fail(err.message || 'Sign in failed'));
+      DB.adminLogin(email, pw).then(token => { done(token); DB.logAdminVisit(email, token).catch(() => {}); }).catch(err => fail(err.message || 'Sign in failed'));
     } else {
       const pw = document.getElementById('admin-pass').value;
       DB.adminLogin(pw).then(done).catch(() => fail('Invalid password (hint: luxe-admin)'));
@@ -2938,7 +4674,9 @@ document.addEventListener('click', (e) => {
     console.warn('No products returned: falling back to local seed');
     PRODUCTS = await LocalAdapter.getProducts();
   }
+  applyProductOrder();
   applySettings();
+  applyAdminTheme();
   loadPersisted();
   updateCart();
   updateWishlist();
